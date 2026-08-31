@@ -1,82 +1,138 @@
-# WiFi CSI Presence Detection — Hackathon 2026 (BYU)
+# WiFi CSI Presence Detection
 
-Binary home/away detection from WiFi Channel State Information, for automatic HVAC control.
+This project uses Wi-Fi Channel State Information (CSI) from two ESP32-C6 boards
+to decide whether a room is occupied. The eventual goal is to turn the AC off
+when nobody is home.
 
-```bash
-python -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m src.build_dataset   # parse 26 captures -> feature cache (~21 s)
-.venv/bin/python main.py                # full evaluation + demo
+## What happened with our first ESP32 capture
+
+The file we tested was:
+
+```text
+data/firstdata-20260831T231802.310639Z_occupied_still.csv
 ```
 
-## Result in one line
+We were inside the room for the entire recording. The correct answer for every
+part of this file is therefore **HOME**.
 
-**94.4% AWAY recall / 98.9% accuracy on a room the model has never seen** — but only
-after per-site calibration. Without it, cross-room AWAY recall is 8.7%.
+The program successfully read all 2,007 CSI packets and turned them into 13
+short analysis windows. When we forced those windows through the old model, it
+returned:
 
-| Evaluation | Accuracy | AWAY recall | Trust it? |
-|---|---|---|---|
-| Random 80/20 split | 99.7% | 100% | ❌ session leakage — inflated |
-| Leave-one-room-out, absolute features | 89.1% | **8.7%** | ✅ honest, and it fails |
-| Leave-one-room-out, calibrated | 98.9% | **94.4%** | ✅ honest, and it works |
+| Result | Windows |
+|---|---:|
+| HOME | 10 |
+| AWAY | 3 |
 
-Validated against a **second dataset on different hardware** (EHUNAM, Broadcom
-BCM43455 / Raspberry Pi). That validation tempers the headline — see
-`validate_ehunam.py`:
+The three AWAY results do **not** mean the room became empty. They were wrong.
+This is not a real accuracy test because:
 
-| Question | Answer |
-|---|---|
-| Do running appliances read as a person? | **7.8–25.8% false HOME** (industrial machines 39.1%); genuinely empty rooms **0.0%** |
-| Does an Intel-trained model work on Broadcom data, no retraining? | macro F1 **0.72** calibrated vs **0.45** uncalibrated |
-| Does it hold across days in one room? | 90.3% acc / **57.4%** AWAY recall, vs 98.1% / 100% same-day |
-| Does it hold across environments with only ONE training site? | **No** — calibration does not rescue it |
+- the current model was trained on Intel Wi-Fi hardware, not our ESP32 boards;
+- this capture only contains one condition: occupied and still;
+- we do not have an empty-room ESP32 recording to use as the room baseline;
+- the radio signal and packet timing changed heavily during the recording.
 
-## Layout
+The capture still helped. It proved that our CSV export contains valid raw CSI,
+the loader understands it, and the feature code runs on real ESP32-C6 data.
+It is useful for checking the data pipeline, but it is not enough to train or
+judge the occupancy detector.
 
-| File | What |
-|---|---|
-| `src/csi_reader.py` | NumPy port of the Intel 5300 CSI Tool reader (upstream is MATLAB-only) |
-| `src/features.py` | CSI → 16 features; why each one, and per-site baseline calibration |
-| `src/build_dataset.py` | Parse all 26 captures → cached feature matrix |
-| `src/train.py` | Both evaluation protocols, metrics, feature importance |
-| `src/pipeline.py` | `predict_presence` / `should_run_ac` / `load_esp32_csi_csv` |
-| `src/ehunam.py` | Range-extracts single files from EHUNAM's 77.7 GB zip; nexmon loader |
-| `src/build_ehunam.py` | EHUNAM → the same feature table |
-| `main.py` | End-to-end run |
-| `validate_ehunam.py` | Cross-dataset / cross-hardware validation |
+The main capture problems were:
 
-## Dataset
+- 199 packets (9.9%) contained all-zero CSI;
+- 1,025 packet IDs were missing;
+- one gap lasted 6.26 seconds;
+- the receiver gain kept changing and was maxed out for about half the capture;
+- the signal dropped from about -65 dBm to around -90 dBm.
 
-[RadioPoints/Device-free_RF_Human_Sensing_Datasets](https://github.com/RadioPoints/Device-free_RF_Human_Sensing_Datasets)
-— WiFi-CrowdCounting (Di Domenico et al., Tor Vergata). Intel IWL-5300, 3 rooms ×
-occupancy 0–8, 229,837 packets → 1,784 windows. `0p` = AWAY, `1p`–`8p` = HOME.
-Not committed; `git clone` it into `data/`.
+## Run an ESP32 CSV
 
-**Validation set:** [EHUNAM](https://doi.org/10.6084/m9.figshare.28541225) (Diaz et al.,
-*Scientific Data* 2025). Published as one 77.7 GB zip with no per-file download, so
-`src/ehunam.py` parses the zip index from the archive's last 4 MB and range-fetches only
-the members it needs — 248 files / 2.4 GB instead of 77.7 GB. Members are Deflate64, which
-Python's `zipfile` cannot read; extraction shells out to `unzip`.
+Install the Python packages once:
 
 ```bash
-.venv/bin/python -m src.build_ehunam   # downloads on first run
-.venv/bin/python validate_ehunam.py
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
-## Plugging in ESP32 data
+Then check a capture:
+
+```bash
+.venv/bin/python -m src.esp_csi data/your_capture.csv
+```
+
+For the first file:
+
+```bash
+.venv/bin/python -m src.esp_csi \
+  data/firstdata-20260831T231802.310639Z_occupied_still.csv
+```
+
+This command checks the CSV, packet loss, timing, gain stability, CSI length,
+and usable subcarriers. It also converts the raw packets into the 16 features
+used by the model. It does not train a new model.
+
+If Python reports that NumPy has the wrong CPU architecture on an Apple Silicon
+Mac, run the same command with `arch -arm64` at the front.
+
+The loader can also be used from Python:
 
 ```python
-from src.pipeline import load_esp32_csi_csv, predict_presence, should_run_ac
-from src.features import fit_site_baseline, FEATURE_NAMES
+from src.esp_csi import load_esp32_csi_csv
 
-out  = load_esp32_csi_csv("my_capture.csv")
-base = fit_site_baseline(out["X"], FEATURE_NAMES)      # calibrate to this house
-pred, conf = predict_presence(model, out["X"][0], baseline=base, fs=out["fs"])
-run_ac, why = should_run_ac(pred, conf)
+capture = load_esp32_csi_csv("data/your_capture.csv")
+
+print(capture["X"].shape)       # one row per analysis window, 16 features
+print(capture["diagnostics"])  # packet rate, RSSI, gain, bad rows, and gaps
 ```
 
-Run `verify_esp32_assumptions(path)` on the first real capture — it checks the
-7 documented ASSUMPTIONs in `src/pipeline.py` and reports which held.
+## Files that matter
 
-**The feature pipeline transfers to ESP32. The fitted model does not** — 1×1 antenna
-and 52 usable subcarriers vs the Intel's 3×2 and 90 channels. Retrain on ESP32 data
-using this same code.
+| File | Why it matters |
+|---|---|
+| `data/*.csv` | Put ESP32 capture files here. |
+| `src/esp_csi.py` | Reads and checks ESP32 CSV files. Start here for a new capture. |
+| `src/features.py` | Converts raw CSI into the 16 values used by the model. |
+| `src/pipeline.py` | Turns model output into HOME/AWAY and AC ON/OFF decisions. |
+| `src/train.py` | Trains and evaluates the occupancy model. |
+| `src/manual_label.py` | Combines a capture with a log of when people entered or left. |
+| `docs/ESP32_SETUP.md` | Board setup and the full data-collection checklist. |
+| `esp32_dry_run.py` | Tests the ESP32 code using fake data. |
+| `main.py` | Runs the older Intel-dataset demo. It does not take an ESP32 CSV. |
+
+## What to collect next
+
+Fix the connection before collecting training data:
+
+1. Set `CONFIG_FORCE_GAIN=1` in the receiver firmware and reflash it.
+2. Move the boards or change the Wi-Fi channel until long gaps and zero-CSI
+   packets stop appearing.
+3. Record a two-minute test and run `python -m src.esp_csi` on it.
+
+Once that test looks clean, record both classes with the boards left in the
+same positions:
+
+- room empty;
+- one person sitting still;
+- one person moving around.
+
+We need both empty and occupied data before we can fit the room baseline,
+retrain on ESP32 measurements, and report meaningful accuracy. See
+[`docs/ESP32_SETUP.md`](docs/ESP32_SETUP.md) for the longer collection plan.
+
+## Older model results
+
+The model currently in the project was built from the WiFi-CrowdCounting
+dataset recorded with Intel IWL-5300 hardware. After room calibration it reached
+98.9% accuracy and 94.4% AWAY recall when testing on a room it had not seen.
+
+Those numbers are evidence that the feature approach can work. They are not
+performance numbers for our ESP32 boards. The ESP32 model needs to be retrained
+with clean ESP32 empty and occupied recordings.
+
+Commands for the older dataset work:
+
+```bash
+.venv/bin/python -m src.build_dataset
+.venv/bin/python main.py
+.venv/bin/python validate_ehunam.py
+```

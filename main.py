@@ -191,9 +191,10 @@ def main():
 
     # ------------------------------------------------------------------
     rule("PHASE 3.2  ESP32 INGESTION PATH")
-    print("  We have no real ESP32 capture yet, so a fixture in the ASSUMED ESP32-CSI-Tool")
-    print("  format is generated to prove the code path runs. The fixture is format-only:")
-    print("  it says nothing about accuracy on real ESP32 hardware.\n")
+    print("  No real ESP32 capture yet, so a fixture in the EXACT esp-csi csi_recv format")
+    print("  (15-column ESP32-C6 schema, HT40, 128 subcarriers) is generated to prove the")
+    print("  code path runs. Format-only: it says nothing about accuracy on real hardware.")
+    print("  For the full integration dry run see esp32_dry_run.py.\n")
     occ = make_synthetic_esp32_csv(os.path.join(ART, "esp32_sample_occupied.csv"),
                                    occupied=True, seed=1)
     emp = make_synthetic_esp32_csv(os.path.join(ART, "esp32_sample_empty.csv"),
@@ -222,7 +223,7 @@ def main():
     print(f"  After calibration {crec:.1%} AWAY recall, {cacc:.1%} accuracy cross-room")
     print(f"  Top signal       temporal variance + normalised variance; NOT mean amplitude")
     print(f"  ESP32 hand-off   feature pipeline transfers; the fitted model does NOT")
-    print(f"                   (1x1 antenna, 52 vs 90 channels) -- retrain, reuse the code")
+    print(f"                   (1x1 antenna, 114 vs 90 channels) -- retrain, reuse the code")
 
 
 if __name__ == "__main__":
