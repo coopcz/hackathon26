@@ -153,6 +153,13 @@ def activate_room(room_id: str):
     except RuntimeError as exc: raise HTTPException(400, str(exc)) from exc
 
 
+@app.post("/api/rooms/{room_id}/preview")
+def preview_room(room_id: str):
+    try: return rooms.preview(room_id)
+    except KeyError as exc: raise HTTPException(404, "room not found") from exc
+    except RuntimeError as exc: raise HTTPException(400, str(exc)) from exc
+
+
 @app.post("/api/model/reload")
 def reload_model():
     predictor.load()

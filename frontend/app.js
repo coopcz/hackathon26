@@ -55,7 +55,7 @@ function renderRooms() {
     const button = document.createElement('button'); button.className = `room-option${room.id === state.roomId ? ' active' : ''}`;
     const dot = document.createElement('i'); const copy = document.createElement('div');
     const name = document.createElement('strong'); name.textContent = room.name;
-    const detail = document.createElement('small'); detail.textContent = room.active ? 'Live model active' : room.validated ? 'Validated' : room.model_ready ? 'Model trained' : 'Setup in progress';
+    const detail = document.createElement('small'); detail.textContent = room.preview ? 'Experimental preview' : room.active ? 'Live model active' : room.validated ? 'Validated' : room.model_ready ? 'Model trained' : 'Setup in progress';
     copy.append(name, detail); button.append(dot, copy);
     button.onclick = () => selectRoom(room.id); list.append(button);
   });
@@ -99,7 +99,7 @@ function renderWorkflow() {
   const trainCounts = room.counts?.training || {}, holdoutCounts = room.counts?.holdout || {};
   const hardwareDone = !!serial.connected && !!quality.healthy;
   const calibrationDone = countReady(trainCounts);
-  const trained = !!room.model_ready, validated = !!room.validated, activated = !!room.active;
+  const trained = !!room.model_ready, validated = !!room.validated, activated = !!room.active, previewing = !!room.preview;
   const flags = [hardwareDone, calibrationDone, trained, validated, activated];
   $('completionValue').textContent = `${flags.filter(Boolean).length * 20}%`;
   document.querySelectorAll('.step').forEach((step, index) => {
@@ -150,14 +150,14 @@ function renderWorkflow() {
     report.querySelector('pre').textContent = room.validation_report || job.output;
   }
 
-  $('activationState').textContent = activated ? 'Active' : validated ? 'Ready' : 'Inactive';
-  $('activationState').className = `state-label ${activated ? 'good' : validated ? 'cyan' : 'neutral'}`;
+  $('activationState').textContent = previewing ? 'Preview' : activated ? 'Active' : validated ? 'Ready' : trained ? 'Experimental' : 'Inactive';
+  $('activationState').className = `state-label ${previewing ? 'warn' : activated ? 'good' : validated ? 'cyan' : 'neutral'}`;
   document.querySelector('.activation-hero').classList.toggle('ready', validated);
-  $('activationTitle').textContent = activated ? 'Monitoring is active' : validated ? 'Ready to deploy' : 'Validation required';
-  $('activationCopy').textContent = activated ? 'This room model is serving live occupancy decisions.' : validated ? 'The holdout set passed. Activation will switch the live predictor to this model.' : 'Complete calibration, training, and holdout validation first.';
+  $('activationTitle').textContent = previewing ? 'Experimental preview is active' : activated ? 'Monitoring is active' : validated ? 'Ready to deploy' : trained ? 'Try it before deployment' : 'Validation required';
+  $('activationCopy').textContent = previewing ? 'Predictions are visible for testing and data collection. This model has not passed validation.' : activated ? 'This room model is serving live occupancy decisions.' : validated ? 'The holdout set passed. Activation will switch the live predictor to this model.' : trained ? 'Preview the trained model live without marking it validated. Treat every result as experimental.' : 'Complete calibration and training to unlock an experimental preview.';
   $('modelIdentity').textContent = room.latest_model ? `${room.latest_model.split('/').pop()} · trained ${shortDate(room.trained_at)}` : 'No room-specific model available.';
-  $('activateModel').disabled = !validated || activated;
-  $('activateModel').textContent = activated ? 'Model active' : 'Activate model';
+  $('activateModel').disabled = !trained || activated;
+  $('activateModel').textContent = previewing ? 'Preview active' : activated ? 'Model active' : validated ? 'Activate model' : 'Preview live';
   renderConditions();
 }
 
@@ -166,8 +166,8 @@ function renderSystem() {
   const connected = !!serial.connected;
   $('connectionBadge').innerHTML = `<i></i> ${connected ? 'Connected' : 'Offline'}`;
   $('connectionBadge').className = `badge ${connected ? quality.healthy ? 'good' : 'warn' : 'neutral'}`;
-  $('modelBadge').textContent = room?.active ? 'Live model active' : room?.validated ? 'Validated model' : room?.model_ready ? 'Model not validated' : 'No room model';
-  $('modelBadge').className = `badge ${room?.active ? 'good' : room?.validated ? 'cyan' : 'neutral'}`;
+  $('modelBadge').textContent = room?.preview ? 'Experimental preview' : room?.active ? 'Live model active' : room?.validated ? 'Validated model' : room?.model_ready ? 'Model not validated' : 'No room model';
+  $('modelBadge').className = `badge ${room?.preview ? 'warn' : room?.active ? 'good' : room?.validated ? 'cyan' : 'neutral'}`;
   $('globalStatus').textContent = connected ? quality.healthy ? 'System healthy' : 'Signal needs attention' : 'System offline';
   $('globalDetail').textContent = connected ? `${fmt(quality.recent_packets_per_second ?? serial.packets_per_second)} packets / sec` : 'No receiver connected';
   $('globalDot').className = `status-dot ${connected ? quality.healthy ? 'good' : 'warn' : 'neutral'}`;
@@ -212,7 +212,7 @@ function renderLive() {
   const room = activeRoom(), serial = state.status?.serial || {}, quality = serial.quality || {};
   $('liveRoomName').textContent = room?.name || 'No active room';
   $('liveModel').textContent = room?.latest_model?.split('/').pop() || 'None active';
-  $('liveCalibration').textContent = room?.validated ? `Validated ${shortDate(room.validated_at)}` : 'Not validated';
+  $('liveCalibration').textContent = room?.preview ? 'Experimental · not validated' : room?.validated ? `Validated ${shortDate(room.validated_at)}` : 'Not validated';
   $('liveQuality').textContent = !quality.ready ? 'Offline' : quality.healthy ? 'Healthy' : 'Needs attention';
   $('liveRate').textContent = Number.isFinite(quality.recent_packets_per_second) ? `${fmt(quality.recent_packets_per_second)} pkt/s` : '—';
   const stale = serial.connected && serial.seconds_since_last_packet != null && serial.seconds_since_last_packet > 3;
@@ -339,7 +339,7 @@ function connectEvents() {
   $('disconnect').onclick = async () => { try { await api('/api/disconnect', {method: 'POST'}); await refreshStatus(); } catch (error) { toast(error.message, true); } };
   $('stopRecording').onclick = async () => { try { await api('/api/recordings/stop', {method: 'POST'}); await refreshStatus(); } catch (error) { toast(error.message, true); } };
   $('trainModel').onclick = () => runRoomJob('train'); $('validateModel').onclick = () => runRoomJob('validate');
-  $('activateModel').onclick = async () => { const room = selectedRoom(); try { await api(`/api/rooms/${room.id}/activate`, {method: 'POST'}); toast(`${room.name} is now serving live decisions.`); await refreshStatus(); await refreshRooms(); switchView('live'); } catch (error) { toast(error.message, true); } };
+  $('activateModel').onclick = async () => { const room = selectedRoom(); const preview = !room.validated; try { await api(`/api/rooms/${room.id}/${preview ? 'preview' : 'activate'}`, {method: 'POST'}); toast(preview ? `${room.name} is running an experimental live preview.` : `${room.name} is now serving live decisions.`); await refreshStatus(); await refreshRooms(); switchView('live'); } catch (error) { toast(error.message, true); } };
   $('openDiagnostics').onclick = () => $('diagnosticsDialog').showModal(); $('refreshRecordings').onclick = refreshRecordings;
 }
 

@@ -51,8 +51,10 @@ class HoldoutHelpersTests(unittest.TestCase):
 class RoomWorkflowTests(unittest.TestCase):
     class PredictorStub:
         error = None
+        loads = 0
 
         def load(self):
+            self.loads += 1
             return True
 
     def test_room_profile_persists_and_counts_scoped_recordings(self):
@@ -74,6 +76,26 @@ class RoomWorkflowTests(unittest.TestCase):
             self.assertEqual(status["room_id"], "bedroom")
             self.assertEqual(status["split"], "holdout")
             recorder.stop()
+
+    def test_unvalidated_model_can_preview_without_becoming_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            recorder = Recorder(root / "recordings")
+            predictor = self.PredictorStub()
+            manager = RoomManager(root, recorder, predictor)
+            room = manager.create("Lab")
+            model = root / "rooms" / room["id"] / "models" / "model.joblib"
+            model.write_bytes(b"model")
+            manager.profiles[room["id"]]["latest_model"] = str(model.relative_to(root))
+            manager._save()
+
+            preview = manager.preview(room["id"])
+
+            self.assertTrue(preview["active"])
+            self.assertTrue(preview["preview"])
+            self.assertFalse(preview["validated"])
+            self.assertEqual((root / "artifacts" / "esp32_model.joblib").read_bytes(),
+                             b"model")
 
 
 if __name__ == "__main__":

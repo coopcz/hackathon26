@@ -72,7 +72,18 @@ class Predictor:
                 return False
             self.bundle = b
             self.window = deque(maxlen=int(b["window_packets"]))
-            self.smooth = deque(maxlen=int(b["smoothing_windows"]))
+            # Training scores overlapping windows every 25% of a window, while
+            # live inference scores every PREDICT_EVERY packets. Preserve the
+            # tuned smoothing duration rather than blindly reusing the training
+            # window count at a different cadence. Older bundles keep the prior
+            # behavior for backwards compatibility.
+            if "smoothing_span_seconds" in b:
+                live_step_seconds = PREDICT_EVERY / float(b["fs"])
+                smooth_count = 1 + round(float(b["smoothing_span_seconds"])
+                                         / live_step_seconds)
+            else:
+                smooth_count = int(b["smoothing_windows"])
+            self.smooth = deque(maxlen=max(1, smooth_count))
             self.n_seen = 0
             self.latest = None
             log.info("loaded model: %s / %s, %d-packet window, threshold %.2f",
@@ -158,7 +169,7 @@ class Predictor:
             "model": b["model"].__class__.__name__,
             "threshold": b["threshold"],
             "window_packets": int(b["window_packets"]),
-            "smoothing_windows": int(b["smoothing_windows"]),
+            "smoothing_windows": int(self.smooth.maxlen),
             "trained_at": b.get("trained_at"),
             "n_recordings": b.get("n_recordings"),
             "n_windows": b.get("n_windows"),

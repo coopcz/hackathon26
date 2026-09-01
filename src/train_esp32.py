@@ -62,7 +62,7 @@ from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from .dataset import AWAY, HOME, build, summarize
+from .dataset import AWAY, HOME, OVERLAP, WINDOW_SECONDS, build, summarize
 from .esp_csi import REFERENCE_SUBCARRIER_MAPS
 from .features import (FEATURE_NAMES, SCALE_FREE_FEATURES, OFFSET_CALIBRATED,
                        BASELINE_PERCENTILE)
@@ -355,8 +355,13 @@ def run(save=True, augment_intel=False, window_seconds=None, overlap=None,
     print(f"  features   {best['feature_set']}")
     print(f"  baseline   {best['baseline_mode'] if best['feature_set'] != 'raw' else 'none'}")
     print(f"  model      {best['model']}")
+    effective_window_seconds = window_seconds or WINDOW_SECONDS
+    effective_overlap = OVERLAP if overlap is None else overlap
+    smoothing_span_seconds = ((best["k"] - 1) * effective_window_seconds
+                              * (1.0 - effective_overlap))
+    total_context_seconds = effective_window_seconds + smoothing_span_seconds
     print(f"  smoothing  {best['k']} windows "
-          f"(~{best['k'] * (window_seconds or 2.56):.1f} s of context)")
+          f"(~{total_context_seconds:.1f} s of context)")
     print(f"  threshold  {best['threshold']:.2f} on p(AWAY)")
     m = best["metrics"]
     print(f"\n  accuracy {m['accuracy']:.3f}   macro F1 {m['f1_macro']:.3f}")
@@ -450,9 +455,10 @@ def run(save=True, augment_intel=False, window_seconds=None, overlap=None,
         "all_feature_names": list(FEATURE_NAMES),
         "threshold": float(best["threshold"]),
         "smoothing_windows": int(best["k"]),
-        "window_seconds": window_seconds or 2.56,
+        "smoothing_span_seconds": float(smoothing_span_seconds),
+        "window_seconds": effective_window_seconds,
         "fs": fs_median,
-        "window_packets": int(round(fs_median * (window_seconds or 2.56))),
+        "window_packets": int(round(fs_median * effective_window_seconds)),
         "subcarriers": REFERENCE_SUBCARRIER_MAPS[128][1],
         "cv": {k: float(v) for k, v in best["metrics"].items()},
         "cv_met_home_floor": bool(best["met_floor"]),

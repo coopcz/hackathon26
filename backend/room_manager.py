@@ -187,16 +187,39 @@ class RoomManager:
             room = self.profiles[room_id]
             if not room.get("validated"):
                 raise RuntimeError("validate this model before activating it")
-            source = self.root / room["latest_model"]
-            if not source.is_file():
-                raise RuntimeError("the room model file is missing")
-            temporary = self.active_model.with_suffix(".joblib.tmp")
-            shutil.copy2(source, temporary)
-            os.replace(temporary, self.active_model)
-            if not self.predictor.load():
-                raise RuntimeError(self.predictor.error or "activated model could not be loaded")
-            for profile in self.profiles.values():
-                profile["active"] = profile["id"] == room_id
+            return self._serve_model(room_id, preview=False)
+
+    def preview(self, room_id: str) -> dict:
+        """Serve a trained model for screen-only experimentation.
+
+        Preview deliberately does not change validation state.  It exists so a
+        team can observe live predictions and collect more labelled recordings
+        before the model is good enough to deploy.
+        """
+        with self.lock:
+            return self._serve_model(room_id, preview=True)
+
+    def _serve_model(self, room_id: str, *, preview: bool) -> dict:
+        room = self.profiles[room_id]
+        if not preview and not room.get("validated"):
+            raise RuntimeError("validate this model before activating it")
+        if not room.get("latest_model"):
+            raise RuntimeError("train a room model before starting live preview")
+        source = self.root / room["latest_model"]
+        if not source.is_file():
+            raise RuntimeError("the room model file is missing")
+        self.active_model.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.active_model.with_suffix(".joblib.tmp")
+        shutil.copy2(source, temporary)
+        os.replace(temporary, self.active_model)
+        if not self.predictor.load():
+            raise RuntimeError(self.predictor.error or "room model could not be loaded")
+        for profile in self.profiles.values():
+            profile["active"] = profile["id"] == room_id
+            profile["preview"] = bool(preview and profile["id"] == room_id)
+        if preview:
+            room["preview_started_at"] = _now()
+        else:
             room["activated_at"] = _now()
-            self._save()
-            return self._public(room)
+        self._save()
+        return self._public(room)
