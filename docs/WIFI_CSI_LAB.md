@@ -6,11 +6,14 @@ and never substitutes synthetic values for missing board data.
 
 ## Run
 
+For the complete board-to-CSV walkthrough and troubleshooting table, see
+[`README.md`](../README.md#record-csi-locally).
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn backend.main:app --reload
+.venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
 Open <http://127.0.0.1:8000>, select the receiver's `/dev/cu.*` port, and

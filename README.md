@@ -12,6 +12,101 @@ exporting lossless JSONL or CSV datasets. It never substitutes generated values
 for missing board data. See [`docs/WIFI_CSI_LAB.md`](docs/WIFI_CSI_LAB.md) for
 setup, data-integrity guarantees, and recording details.
 
+### Record CSI locally
+
+#### 1. Prepare the boards
+
+- Flash one ESP32-C6 with Espressif's `csi_send` example (TX).
+- Flash the other ESP32-C6 with Espressif's `csi_recv` example (RX).
+- Power the TX board and connect the RX board to the Mac by USB.
+- Confirm that the RX serial output contains lines beginning with `CSI_DATA,`.
+
+Only the RX board connects to the dashboard. The TX board runs independently.
+The backend uses 921600 baud and owns the serial connection, so close any serial
+monitor that already has the RX port open.
+
+#### 2. Install the local app
+
+From the repository root on the Mac:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+This setup is required only once. On later runs, reuse the existing `.venv`.
+
+#### 3. Start the dashboard
+
+```bash
+.venv/bin/python -m uvicorn backend.main:app \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+Keep that terminal open. Open <http://127.0.0.1:8000> in a browser.
+
+#### 4. Connect the receiver
+
+1. Click **Refresh ports**.
+2. Choose the RX port, normally `/dev/cu.usbmodem...` on macOS.
+3. Click **Connect**.
+4. Confirm that the status says **Connected** and the packet count increases.
+5. Check that RSSI, channel, CSI length, and the plots update from received data.
+
+If two USB modem ports are listed, try one at a time. The RX is the port whose
+packet count increases with valid CSI. Do not connect both ports in the app.
+
+#### 5. Record a labeled session
+
+1. Select one label: `empty`, `occupied_still`, or `occupied_moving`.
+2. Add notes describing the person, position, room, door state, board placement,
+   and anything moving in the environment.
+3. Click **Start recording**.
+4. Move to the intended test position during the 10-second countdown.
+5. Collect the planned duration, then click **Cancel / Stop**.
+
+The backend excludes every packet received during the countdown. Once the
+countdown finishes, every accepted packet is saved until Stop is clicked. For
+an empty-room trial, be aware that walking back to the computer before clicking
+Stop becomes part of the recording; keep the computer outside the measured
+area, use an assistant, or exclude that trial from training if it is
+contaminated.
+
+#### 6. Find or export the data
+
+Native recordings are stored as ignored JSONL files in:
+
+```text
+recordings/<timestamp>_<label>.jsonl
+```
+
+To export a session:
+
+1. Find it under **Previous recordings**.
+2. Select the filename.
+3. Click **Export CSV**.
+
+The CSV preserves `raw_csi`, `amplitude`, `phase`, and `features` as JSON inside
+properly quoted cells. It also includes the board metadata, session label,
+notes, timestamps, and motion score. The JSONL and CSV arrays contain real
+accepted board values; visualization smoothing and normalization are never
+written into the dataset.
+
+#### Troubleshooting
+
+| Problem | Check |
+|---|---|
+| No `/dev/cu.usbmodem...` port | Reseat the RX USB cable, try a data-capable cable/port, then click **Refresh ports**. |
+| Port is busy or permission is denied | Close ESP-IDF Monitor, `screen`, Arduino Serial Monitor, and any other program using the port. |
+| Connected but packet count stays at zero | Verify the selected board is RX, its firmware is running, TX is powered, baud is 921600, and serial output begins with `CSI_DATA,`. |
+| Rejected count increases | Inspect the backend terminal; malformed rows and CSI length mismatches are rejected instead of saved. |
+| Browser opens but the app does not load | Confirm the Uvicorn terminal is still running and use exactly `http://127.0.0.1:8000`. |
+| Charts appear stale | Confirm packets are increasing, then refresh the browser; recording happens in the backend independently of chart refresh rate. |
+
+Stop the server with `Control-C` in its terminal. Existing recordings remain in
+`recordings/` and are intentionally excluded from Git commits.
+
 ## What happened with our first ESP32 capture
 
 The file we tested was:
