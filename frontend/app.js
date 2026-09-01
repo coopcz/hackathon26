@@ -1,90 +1,356 @@
-const $=id=>document.getElementById(id), history={x:[],rssi:[],motion:[],amps:[]}; let latest=null,pending=null,lastDraw=0,recordingWasActive=false;
-const layout={autosize:true,paper_bgcolor:'transparent',plot_bgcolor:'transparent',font:{color:'#9eb1c8'},margin:{t:15,r:15,b:42,l:52},xaxis:{gridcolor:'#203148',automargin:true},yaxis:{gridcolor:'#203148',automargin:true}};
-const plotConfig={responsive:true,displaylogo:false,scrollZoom:false};
-function error(e){$('error').textContent=e?.message||String(e)} async function api(path,opts={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...opts});if(!r.ok){let d;try{d=await r.json()}catch{}throw Error(d?.detail||`${r.status} ${r.statusText}`)}return r.json()}
-function fmt(v,d=2){return Number.isFinite(v)?Number(v).toFixed(d):'—'}
-function processed(a){let from=Math.max(0,+$('from').value||0),to=Math.min(a.length,+$('to').value||a.length),v=a.slice(from,to),x=v.map((_,i)=>i+from);if($('removezero').checked){let keep=v.map((n,i)=>n!==0?i:-1).filter(i=>i>=0);x=keep.map(i=>x[i]);v=keep.map(i=>v[i])}let w=Math.max(1,+$('smooth').value||1);if(w>1)v=v.map((_,i)=>{let s=v.slice(Math.max(0,i-w+1),i+1);return s.reduce((a,b)=>a+b,0)/s.length});if($('normalize').checked&&v.length){let m=v.reduce((a,b)=>a+b,0)/v.length,sd=Math.sqrt(v.reduce((a,b)=>a+(b-m)**2,0)/v.length);v=v.map(n=>sd?(n-m)/sd:0)}return{x,v}}
-function renderLatest(){if(!latest)return;let q=processed(latest.amplitude);Plotly.react('amplitude',[{x:q.x,y:q.v,type:'scatter',mode:'lines',name:'amplitude'}],layout,plotConfig)}
-function drawPacket(p){latest=p;$('nodata').hidden=true;[['rssi',p.rssi],['noise',p.noise_floor],['agc',p.agc_gain],['fft',p.fft_gain],['channel',p.channel],['length',p.csi_length]].forEach(([id,v])=>$(id).textContent=v??'—');let f=p.features||{};[['mean',f.mean_amplitude],['std',f.std_amplitude],['median',f.median_amplitude],['variance',f.variance_amplitude],['difference',f.frame_difference]].forEach(([id,v])=>$(id).textContent=fmt(v));renderLatest();let t=p.received_at;history.x.push(t);history.rssi.push(p.rssi);history.motion.push(p.motion_score);let picks=[.1,.2,.3,.4,.55,.65,.75,.9].map(n=>Math.min(p.amplitude.length-1,Math.floor(n*p.amplitude.length)));history.amps.push(picks.map(i=>p.amplitude[i]));if(history.x.length>300)Object.values(history).forEach(a=>a.shift());Plotly.react('history',picks.map((idx,j)=>({x:history.x,y:history.amps.map(a=>a[j]),mode:'lines',name:`SC ${idx}`})),layout,plotConfig);Plotly.react('motion',[{x:history.x,y:history.motion,mode:'lines',connectgaps:false}],layout,plotConfig);Plotly.react('rssihistory',[{x:history.x,y:history.rssi,mode:'lines'}],layout,plotConfig)}
-function schedulePacket(p){pending=p;let wait=Math.max(0,125-(performance.now()-lastDraw));if(schedulePacket.timer)return;schedulePacket.timer=setTimeout(()=>{schedulePacket.timer=null;let next=pending;pending=null;lastDraw=performance.now();if(next)drawPacket(next)},wait)}
+const $ = id => document.getElementById(id);
+const LABELS = {
+  empty: {name: 'Empty', detail: 'Nobody inside', symbol: '○'},
+  occupied_still: {name: 'Occupied · still', detail: 'Person seated or standing', symbol: '│'},
+  occupied_moving: {name: 'Occupied · moving', detail: 'Person walking through space', symbol: '↗'}
+};
+const state = {
+  rooms: [], roomId: localStorage.getItem('roomsense.room'), status: null,
+  recordings: [], filter: 'all', lastRecordingActive: false, quality: new Map(),
+  decisions: [], latestPacket: null, view: 'setup', step: 'hardware'
+};
 
-// ---- occupancy verdict -----------------------------------------------------
-const phist={t:[],p:[]}; let modelThreshold=null,phist0=null;
-function drawPrediction(v){
-  $('replaybadge').hidden = v.source!=='replay';
-  let el=$('presence'); el.textContent=v.presence; el.className=v.presence==='HOME'?'home':'away';
-  $('confidence').textContent=(v.confidence*100).toFixed(1)+'%';
-  let ac=$('ac'); ac.textContent=v.run_ac?'AC ON':'AC OFF'; ac.className='badge '+(v.run_ac?'acon':'acoff');
-  $('why').textContent=v.reason;
-  if(phist0===null)phist0=performance.now();
-  phist.t.push((performance.now()-phist0)/1000); phist.p.push(v.p_home);
-  if(phist.t.length>240){phist.t.shift();phist.p.shift()}
-  drawPresencePlot();
-}
-function drawPresencePlot(){
-  if(!phist.t.length)return;
-  // p(occupied) over time against the tuned decision line. The y range is pinned
-  // to [0,1] so the gap between the trace and the line reads as the actual
-  // decision margin -- autoscaling would make a confident call look marginal.
-  let x0=phist.t[0],x1=Math.max(phist.t[phist.t.length-1],x0+1),thr=1-modelThreshold;
-  let traces=[{x:phist.t,y:phist.p,mode:'lines',name:'p(occupied)',
-    line:{color:'#ffca6b',width:2,shape:'spline'},fill:'tozeroy',fillcolor:'rgba(255,202,107,.13)'}];
-  if(modelThreshold!==null)traces.push({x:[x0,x1],y:[thr,thr],mode:'lines',
-    name:'decision line',line:{color:'#64e6b1',width:1.5,dash:'dot'},hoverinfo:'skip'});
-  Plotly.react('presenceplot',traces,{...layout,margin:{t:8,r:12,b:34,l:48},showlegend:false,
-    xaxis:{...layout.xaxis,range:[x0,x1],title:{text:'seconds',font:{size:10}}},
-    yaxis:{...layout.yaxis,range:[0,1],autorange:false,dtick:0.5,
-           title:{text:'p(occupied)',font:{size:10}}},
-    annotations:modelThreshold===null?[]:[{x:x1,y:thr,xanchor:'right',yanchor:'bottom',
-      text:`decision line ${thr.toFixed(2)}`,showarrow:false,font:{size:9,color:'#64e6b1'}}]
-  },plotConfig);
-}
-function renderModelInfo(p){
-  if(!p||!p.loaded){modelThreshold=null;
-    $('modelinfo').textContent=(p&&p.error)||(p&&p.message)||'No trained model.';
-    if(!phist.t.length){$('presence').textContent='—';$('presence').className='none';
-      $('why').textContent='Train a model first: python -m src.train_esp32'}
-    return}
-  modelThreshold=p.threshold;
-  let cv=p.cv?`  ·  cross-validated AWAY recall ${(p.cv.recall_away*100).toFixed(1)}%, HOME recall ${(p.cv.recall_home*100).toFixed(1)}%`:'';
-  $('modelinfo').textContent=`${p.model} on ${p.feature_set} features  ·  ${p.window_packets}-packet window  ·  AWAY threshold ${p.threshold.toFixed(2)}  ·  trained on ${p.n_recordings} recordings / ${p.n_windows} windows${cv}`;
-  if(!p.latest&&!phist.t.length){$('presence').textContent='—';$('presence').className='none';
-    $('why').textContent=`Waiting for a full window (${p.buffer}/${p.window_packets} packets).`}
+async function api(path, options = {}) {
+  const response = await fetch(path, {headers: {'Content-Type': 'application/json'}, ...options});
+  if (!response.ok) {
+    let body;
+    try { body = await response.json(); } catch (_) {}
+    throw new Error(body?.detail || `${response.status} ${response.statusText}`);
+  }
+  return response.json();
 }
 
-// ---- replay ----------------------------------------------------------------
-let replayFiles=[];
-async function replayList(){try{replayFiles=await api('/api/replay/recordings');
-  $('replayfile').innerHTML='<option value="">Choose a recording</option>'+
-    replayFiles.map(r=>`<option value="${r.filename}">${r.filename}</option>`).join('')}catch(e){error(e)}}
-async function startReplay(filename){
-  if(!filename){error('Choose a recording, or use one of the buttons above.');return}
-  try{error('');
-    // switching sources mid-replay is the normal case when demoing, so stop
-    // whatever is running rather than refusing with "already running"
-    await api('/api/replay/stop',{method:'POST'});
-    phist.t=[];phist.p=[];phist0=null;$('presence').textContent='—';
-    $('presence').className='none';$('why').textContent='Filling the first window…';
-    Plotly.purge('presenceplot');
-    await api('/api/replay/start',{method:'POST',
-      body:JSON.stringify({filename,speed:+$('replayspeed').value||1})});await status()}catch(e){error(e)}}
-// One click per condition: grab the first recording carrying that label. Makes the
-// model demonstrable without a board, and without hunting through 30 filenames.
-document.querySelectorAll('.demo').forEach(b=>b.onclick=()=>{
-  let want=b.dataset.label,
-      hit=replayFiles.find(r=>r.filename.includes(want)
-        &&(want!=='occupied_still'||!r.filename.includes('moving')));
-  if(!hit){error(`No ${want} recording found in recordings/.`);return}
-  $('replayfile').value=hit.filename; startReplay(hit.filename)});
-$('replaystart').onclick=()=>startReplay($('replayfile').value);
-$('replaystop').onclick=async()=>{try{await api('/api/replay/stop',{method:'POST'});await status()}catch(e){error(e)}};
+function toast(message, bad = false) {
+  const node = $('toast');
+  node.textContent = message; node.className = `show${bad ? ' bad' : ''}`;
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => node.className = '', 4200);
+}
 
-async function ports(){try{let ps=await api('/api/ports'),old=$('port').value;$('port').innerHTML='<option value="">Select RX serial port</option>'+ps.map(p=>`<option value="${p.device}">${p.device} — ${p.description}</option>`).join('');$('port').value=old}catch(e){error(e)}}
-async function status(){try{let s=await api('/api/status'),x=s.serial;$('status').textContent=x.connected?'Connected':'Disconnected';$('status').className='badge '+(x.connected?'on':'off');$('packets').textContent=x.packet_count;$('rate').textContent=fmt(x.packets_per_second,1);$('rejected').textContent=x.rejected_count;if(x.error)error(x.error);if(x.connected&&x.seconds_since_last_packet!==null&&x.seconds_since_last_packet>3)$('nodata').hidden=false;let r=s.recording;if(!r.active){let done=r.last_result?.stop_reason==='automatic';$('recstate').textContent=done?`Completed automatically · ${r.last_result.packet_count} packets`:'Not recording'}else if(r.state==='countdown')$('recstate').textContent=`Starting in ${Math.max(1,Math.ceil(r.countdown_remaining))}s — move to the test position`;else{let elapsed=Math.min(r.duration_seconds,Math.max(0,Math.floor((Date.now()-Date.parse(r.started_at))/1000)));$('recstate').textContent=`Recording ${elapsed}s / ${r.duration_seconds}s · ${r.packet_count} packets`}renderModelInfo(s.prediction);let rp=s.replay||{};$('replaystate').textContent=rp.active?`Replaying ${rp.filename} · ${rp.packet_count} packets`:(rp.finished?`Finished · ${rp.packet_count} packets`:'Idle');$('replaystart').disabled=!!rp.active;$('replaystop').disabled=!rp.active;if(rp.active)$('nodata').hidden=true;$('start').disabled=r.active;$('stop').disabled=!r.active;if(recordingWasActive&&!r.active)await recordings();recordingWasActive=r.active}catch(e){error(e)}}
-function ws(){let s=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/live`);s.onmessage=e=>{let m=JSON.parse(e.data);if(m.type==='packet')schedulePacket(m.data);else if(m.type==='prediction')drawPrediction(m.data)};s.onclose=()=>setTimeout(ws,1000)}
-$('refresh').onclick=ports;$('connect').onclick=async()=>{try{error('');await api('/api/connect',{method:'POST',body:JSON.stringify({port:$('port').value})});connectedAt=Date.now();await status()}catch(e){error(e)}};$('disconnect').onclick=async()=>{try{await api('/api/disconnect',{method:'POST'});await status()}catch(e){error(e)}};
-$('start').onclick=async()=>{try{await api('/api/recordings/start',{method:'POST',body:JSON.stringify({label:$('label').value,notes:$('notes').value,delay_seconds:10,duration_seconds:30})});await status()}catch(e){error(e)}};$('stop').onclick=async()=>{try{await api('/api/recordings/stop',{method:'POST'});await status();await recordings()}catch(e){error(e)}};
-async function recordings(){try{let rs=await api('/api/recordings');$('recordings').innerHTML='<option value="">Choose a recording</option>'+rs.map(r=>`<option value="${r.filename}">${r.filename} · ${r.label||'unknown'}</option>`).join('')}catch(e){error(e)}}
-$('reload').onclick=recordings;$('load').onclick=async()=>{try{let d=await api('/api/recordings/'+encodeURIComponent($('recordings').value)),p=d.packets;$('details').textContent=JSON.stringify({filename:d.filename,packets_loaded:p.length,truncated:d.truncated,label:p[0]?.session_label??null,notes:p[0]?.session_notes??null,started_at:p[0]?.session_timestamp??null},null,2);Plotly.react('replay',[{x:p.map(x=>x.received_at),y:p.map(x=>x.motion_score),name:'motion score',mode:'lines'}],layout,plotConfig)}catch(e){error(e)}};
-$('export').onclick=()=>{let name=$('recordings').value;if(!name){error('Choose a recording before exporting CSV.');return}error('');location.href='/api/recordings/'+encodeURIComponent(name)+'/csv'};
-['from','to','normalize','smooth','removezero'].forEach(id=>$(id).onchange=renderLatest);ports();recordings();replayList();status();setInterval(status,1000);ws();
+const selectedRoom = () => state.rooms.find(room => room.id === state.roomId) || null;
+const activeRoom = () => state.status?.active_room || state.rooms.find(room => room.active) || null;
+const countReady = (counts, minimum = 3) => Object.values(counts || {}).every(value => value >= minimum);
+const fmt = (value, digits = 1) => Number.isFinite(value) ? Number(value).toFixed(digits) : '—';
+const shortDate = value => value ? new Date(value).toLocaleString([], {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'}) : '—';
+
+function switchView(name) {
+  state.view = name;
+  document.querySelectorAll('.view').forEach(node => node.classList.toggle('active', node.id === `${name}View`));
+  document.querySelectorAll('.nav-item').forEach(node => node.classList.toggle('active', node.dataset.view === name));
+  document.body.classList.remove('menu-open');
+  if (name === 'data') renderRecordings();
+}
+
+function switchStep(name) {
+  state.step = name;
+  document.querySelectorAll('.step').forEach(node => node.classList.toggle('active', node.dataset.step === name));
+  document.querySelectorAll('.stage-panel').forEach(node => node.classList.toggle('active', node.dataset.panel === name));
+}
+
+function renderRooms() {
+  const list = $('roomList'); list.replaceChildren();
+  if (!state.rooms.length) {
+    const empty = document.createElement('p'); empty.className = 'no-rooms'; empty.textContent = 'No rooms mapped yet.'; list.append(empty);
+  }
+  state.rooms.forEach(room => {
+    const button = document.createElement('button'); button.className = `room-option${room.id === state.roomId ? ' active' : ''}`;
+    const dot = document.createElement('i'); const copy = document.createElement('div');
+    const name = document.createElement('strong'); name.textContent = room.name;
+    const detail = document.createElement('small'); detail.textContent = room.active ? 'Live model active' : room.validated ? 'Validated' : room.model_ready ? 'Model trained' : 'Setup in progress';
+    copy.append(name, detail); button.append(dot, copy);
+    button.onclick = () => selectRoom(room.id); list.append(button);
+  });
+  const room = selectedRoom(), picker = $('roomPicker');
+  picker.replaceChildren();
+  if (!state.rooms.length) { const option = document.createElement('option'); option.value = ''; option.textContent = 'No room selected'; picker.append(option); }
+  state.rooms.forEach(item => { const option = document.createElement('option'); option.value = item.id; option.textContent = item.name; picker.append(option); });
+  picker.value = room?.id || '';
+  $('setupRoomName').textContent = room?.name || 'Room setup';
+  $('placementText').textContent = room?.placement || 'No placement notes saved for this room.';
+  $('emptyState').hidden = state.rooms.length > 0;
+  document.querySelectorAll('.view').forEach(view => { if (!state.rooms.length) view.classList.remove('active'); });
+  if (state.rooms.length && !document.querySelector('.view.active')) switchView(state.view);
+}
+
+function selectRoom(roomId) {
+  state.roomId = roomId; localStorage.setItem('roomsense.room', roomId);
+  renderAll(); refreshRecordings(); document.body.classList.remove('menu-open');
+}
+
+function conditionMarkup(split, target) {
+  const room = selectedRoom(); const counts = room?.counts?.[split] || {};
+  return Object.entries(LABELS).map(([label, meta]) => {
+    const count = counts[label] || 0, progress = Math.min(100, count / target * 100);
+    return `<div class="condition-row"><div class="condition-title"><span class="condition-symbol">${meta.symbol}</span><div><strong>${meta.name}</strong><small>${meta.detail}</small></div></div><div class="progress-track"><i style="width:${progress}%"></i></div><div class="condition-count"><b>${count}</b> / ${target}</div><button class="button secondary record-condition" data-label="${label}" data-split="${split}">Record</button></div>`;
+  }).join('');
+}
+
+function renderConditions() {
+  $('trainingConditions').innerHTML = conditionMarkup('training', 10);
+  $('holdoutConditions').innerHTML = conditionMarkup('holdout', 3);
+  document.querySelectorAll('.record-condition').forEach(button => {
+    button.disabled = !state.status?.serial?.connected || state.status?.recording?.active || !selectedRoom();
+    button.onclick = () => startRecording(button.dataset.label, button.dataset.split);
+  });
+}
+
+function renderWorkflow() {
+  const room = selectedRoom(); if (!room) return;
+  const serial = state.status?.serial || {}, quality = serial.quality || {};
+  const trainCounts = room.counts?.training || {}, holdoutCounts = room.counts?.holdout || {};
+  const hardwareDone = !!serial.connected && !!quality.healthy;
+  const calibrationDone = countReady(trainCounts);
+  const trained = !!room.model_ready, validated = !!room.validated, activated = !!room.active;
+  const flags = [hardwareDone, calibrationDone, trained, validated, activated];
+  $('completionValue').textContent = `${flags.filter(Boolean).length * 20}%`;
+  document.querySelectorAll('.step').forEach((step, index) => {
+    step.classList.toggle('complete', flags[index]);
+    step.classList.toggle('attention', index === 0 && serial.connected && !quality.healthy);
+  });
+
+  $('hardwareState').textContent = !serial.connected ? 'Not connected' : quality.healthy ? 'Signal healthy' : 'Check signal';
+  $('hardwareState').className = `state-label ${!serial.connected ? 'neutral' : quality.healthy ? 'good' : 'warn'}`;
+  $('streamQuality').textContent = !quality.ready ? 'Waiting' : quality.healthy ? 'Healthy' : 'Attention';
+  $('streamQuality').className = !quality.ready ? '' : quality.healthy ? 'good' : 'warn';
+  $('streamReason').textContent = (quality.problems || []).join(' · ') || (quality.ready ? 'Live CSI is stable' : 'Connect a receiver to begin');
+  $('packetRate').textContent = fmt(quality.recent_packets_per_second ?? serial.packets_per_second);
+  $('rssi').textContent = fmt(quality.rssi_mean, 0);
+  $('csiLength').textContent = quality.csi_length_mode ?? state.latestPacket?.csi_length ?? '—';
+  $('connect').hidden = !!serial.connected; $('disconnect').hidden = !serial.connected;
+  $('port').disabled = !!serial.connected; $('refresh').disabled = !!serial.connected;
+
+  const total = Object.values(trainCounts).reduce((sum, value) => sum + value, 0);
+  const recommended = 30; const coverage = Math.min(100, Math.round(total / recommended * 100));
+  $('trainPercent').textContent = `${coverage}%`;
+  $('trainingReadiness').textContent = calibrationDone ? (total >= recommended ? 'Recommended coverage reached' : 'Minimum coverage reached') : 'More calibration needed';
+  $('trainingCopy').textContent = total >= recommended ? 'All three room conditions have ten sessions.' : `${total} of ${recommended} recommended sessions collected. Training unlocks at three per condition.`;
+  $('trainingCounts').innerHTML = Object.entries(LABELS).map(([key, meta]) => `<div><span>${meta.name}</span><strong>${trainCounts[key] || 0} sessions</strong></div>`).join('');
+  $('trainState').textContent = room.job?.kind === 'train' && room.job.status === 'running' ? 'Training' : trained ? 'Model ready' : 'Not trained';
+  $('trainState').className = `state-label ${trained ? 'good' : room.job?.status === 'failed' ? 'bad' : room.job?.status === 'running' ? 'cyan' : 'neutral'}`;
+  $('trainModel').disabled = !calibrationDone || room.job?.status === 'running';
+  $('trainModel').textContent = room.job?.kind === 'train' && room.job.status === 'running' ? 'Training…' : trained ? 'Retrain room model' : 'Train room model';
+
+  const job = room.job;
+  $('trainJob').hidden = !job || (job.kind !== 'train' && !job.output);
+  if (job) {
+    $('trainJob').querySelector('.spinner').hidden = job.status !== 'running';
+    $('trainJob').querySelector('strong').textContent = job.status === 'running' ? `${job.kind === 'train' ? 'Training' : 'Validating'} room model` : `Last job ${job.status}`;
+    $('trainOutput').textContent = job.output || 'Building features and evaluating candidates…';
+  }
+
+  $('validationState').textContent = job?.kind === 'validate' && job.status === 'running' ? 'Validating' : validated ? 'Passed' : 'Not validated';
+  $('validationState').className = `state-label ${validated ? 'good' : job?.kind === 'validate' && job.status === 'failed' ? 'bad' : job?.kind === 'validate' && job.status === 'running' ? 'cyan' : 'neutral'}`;
+  $('validateModel').disabled = !trained || !countReady(holdoutCounts) || job?.status === 'running';
+  $('validateModel').textContent = job?.kind === 'validate' && job.status === 'running' ? 'Validating…' : validated ? 'Run validation again' : 'Run validation';
+  const report = $('validationReport');
+  report.hidden = !room.validation_report && !(job?.kind === 'validate' && job.status === 'failed');
+  if (!report.hidden) {
+    const passed = !!room.validation_report;
+    report.className = `validation-report${passed ? '' : ' bad'}`;
+    report.innerHTML = `<strong>${passed ? 'Validation passed' : 'Validation failed'}</strong><span>${passed ? 'The room model met every deployment gate.' : 'Review the failed condition and collect replacement holdouts.'}</span><pre></pre>`;
+    report.querySelector('pre').textContent = room.validation_report || job.output;
+  }
+
+  $('activationState').textContent = activated ? 'Active' : validated ? 'Ready' : 'Inactive';
+  $('activationState').className = `state-label ${activated ? 'good' : validated ? 'cyan' : 'neutral'}`;
+  document.querySelector('.activation-hero').classList.toggle('ready', validated);
+  $('activationTitle').textContent = activated ? 'Monitoring is active' : validated ? 'Ready to deploy' : 'Validation required';
+  $('activationCopy').textContent = activated ? 'This room model is serving live occupancy decisions.' : validated ? 'The holdout set passed. Activation will switch the live predictor to this model.' : 'Complete calibration, training, and holdout validation first.';
+  $('modelIdentity').textContent = room.latest_model ? `${room.latest_model.split('/').pop()} · trained ${shortDate(room.trained_at)}` : 'No room-specific model available.';
+  $('activateModel').disabled = !validated || activated;
+  $('activateModel').textContent = activated ? 'Model active' : 'Activate model';
+  renderConditions();
+}
+
+function renderSystem() {
+  const serial = state.status?.serial || {}, quality = serial.quality || {}, room = selectedRoom();
+  const connected = !!serial.connected;
+  $('connectionBadge').innerHTML = `<i></i> ${connected ? 'Connected' : 'Offline'}`;
+  $('connectionBadge').className = `badge ${connected ? quality.healthy ? 'good' : 'warn' : 'neutral'}`;
+  $('modelBadge').textContent = room?.active ? 'Live model active' : room?.validated ? 'Validated model' : room?.model_ready ? 'Model not validated' : 'No room model';
+  $('modelBadge').className = `badge ${room?.active ? 'good' : room?.validated ? 'cyan' : 'neutral'}`;
+  $('globalStatus').textContent = connected ? quality.healthy ? 'System healthy' : 'Signal needs attention' : 'System offline';
+  $('globalDetail').textContent = connected ? `${fmt(quality.recent_packets_per_second ?? serial.packets_per_second)} packets / sec` : 'No receiver connected';
+  $('globalDot').className = `status-dot ${connected ? quality.healthy ? 'good' : 'warn' : 'neutral'}`;
+  renderDiagnostics(serial, quality);
+}
+
+function renderDiagnostics(serial, quality) {
+  $('diagPackets').textContent = serial.packet_count ?? 0; $('diagRejected').textContent = serial.rejected_count ?? 0;
+  $('diagRssi').textContent = Number.isFinite(quality.rssi_mean) ? `${fmt(quality.rssi_mean, 0)} dBm` : '—';
+  $('diagJitter').textContent = fmt(quality.delivery_jitter, 2); $('diagAgc').textContent = fmt(quality.agc_gain_std, 2);
+  $('diagLength').textContent = quality.csi_length_mode ?? '—';
+  $('diagProblems').textContent = (quality.problems || []).join(' · ') || (quality.ready ? 'No stream-quality problems detected.' : 'Connect a receiver to inspect the stream.');
+}
+
+function markUnavailable(reason) {
+  $('occupancyField').className = 'occupancy-field unavailable'; $('presence').textContent = '—';
+  $('confidence').textContent = '—'; $('confidenceFill').style.width = '0'; $('presenceReason').textContent = reason;
+}
+
+function drawPrediction(value) {
+  if (value.source && value.source !== 'live') return;
+  const active = activeRoom(); if (!active) return;
+  const presence = value.presence === 'HOME' ? 'home' : 'away';
+  $('occupancyField').className = `occupancy-field ${presence}`;
+  $('presence').textContent = value.presence === 'HOME' ? 'OCCUPIED' : 'EMPTY';
+  $('occupancyKicker').textContent = `${active.name} · room state`;
+  $('confidence').textContent = `${(value.confidence * 100).toFixed(1)}%`;
+  $('confidenceFill').style.width = `${value.confidence * 100}%`;
+  $('presenceReason').textContent = value.presence === 'HOME' ? 'Presence detected. Comfort systems may remain active.' : 'No occupant detected. Room can enter energy-saving mode.';
+  const decision = {presence, label: value.presence === 'HOME' ? 'Occupied' : 'Empty', confidence: value.confidence, at: new Date()};
+  if (state.decisions.at(-1)?.label !== decision.label || Date.now() - state.decisions.at(-1).at > 10000) state.decisions.push(decision);
+  state.decisions = state.decisions.slice(-5); renderTimeline();
+}
+
+function renderTimeline() {
+  const target = $('decisionTimeline');
+  if (!state.decisions.length) { target.innerHTML = '<p>No live decisions yet.</p>'; return; }
+  target.innerHTML = state.decisions.slice().reverse().map(item => `<div class="decision ${item.presence}"><i></i><span>${item.label} · ${(item.confidence * 100).toFixed(0)}%</span><span>${item.at.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit', second: '2-digit'})}</span></div>`).join('');
+}
+
+function renderLive() {
+  const room = activeRoom(), serial = state.status?.serial || {}, quality = serial.quality || {};
+  $('liveRoomName').textContent = room?.name || 'No active room';
+  $('liveModel').textContent = room?.latest_model?.split('/').pop() || 'None active';
+  $('liveCalibration').textContent = room?.validated ? `Validated ${shortDate(room.validated_at)}` : 'Not validated';
+  $('liveQuality').textContent = !quality.ready ? 'Offline' : quality.healthy ? 'Healthy' : 'Needs attention';
+  $('liveRate').textContent = Number.isFinite(quality.recent_packets_per_second) ? `${fmt(quality.recent_packets_per_second)} pkt/s` : '—';
+  const stale = serial.connected && serial.seconds_since_last_packet != null && serial.seconds_since_last_packet > 3;
+  $('liveSignal').textContent = !serial.connected ? 'Offline' : stale ? 'Stream stalled' : quality.healthy ? 'Live' : 'Signal warning';
+  $('liveSignal').className = `state-label ${!serial.connected ? 'neutral' : stale || !quality.healthy ? 'warn' : 'good'}`;
+  $('liveFreshness').textContent = !room ? 'Activate a validated room model to begin.' : !serial.connected ? 'Room model is ready. Connect its receiver to begin live monitoring.' : stale ? 'The CSI stream has stopped; the prior decision was cleared.' : 'Occupancy updates approximately twice per second after the initial warm-up.';
+  if (!room) markUnavailable('No validated room model is active.');
+  else if (!serial.connected) markUnavailable('Receiver offline — no current room decision.');
+  else if (stale) markUnavailable('CSI stream stalled — prior decision cleared.');
+  else if (!state.status?.prediction?.latest) {
+    const p = state.status?.prediction; markUnavailable(`Warming up signal window${p ? ` · ${p.buffer}/${p.window_packets} packets` : ''}`);
+  }
+}
+
+function renderRecordingStatus() {
+  const recording = state.status?.recording || {}; const bar = $('recordingBar');
+  bar.hidden = !recording.active;
+  if (recording.active) {
+    const name = LABELS[recording.label]?.name || recording.label;
+    $('recordingTitle').textContent = recording.state === 'countdown' ? `Prepare: ${name}` : `Recording: ${name}`;
+    $('recordingDetail').textContent = recording.state === 'countdown' ? `Starts in ${Math.max(1, Math.ceil(recording.countdown_remaining))} seconds — move to the correct position` : `${Math.ceil(recording.recording_remaining)} seconds remaining · ${recording.packet_count} packets`;
+  }
+  if (state.lastRecordingActive && !recording.active) {
+    refreshRooms(); refreshRecordings();
+    if (recording.last_result?.stop_reason === 'automatic') toast(`Recording saved · ${recording.last_result.packet_count} packets`);
+  }
+  state.lastRecordingActive = !!recording.active;
+}
+
+function renderRecordings() {
+  const target = $('recordingRows'), room = selectedRoom();
+  let rows = state.recordings.filter(row => row.room_id === room?.id);
+  if (state.filter !== 'all') rows = rows.filter(row => row.split === state.filter);
+  target.replaceChildren();
+  if (!rows.length) { const empty = document.createElement('div'); empty.className = 'recording-empty'; empty.textContent = room ? 'No recordings in this dataset yet.' : 'Select a room to see its recordings.'; target.append(empty); return; }
+  rows.forEach(row => {
+    const line = document.createElement('div'); line.className = 'recording-row';
+    const condition = document.createElement('span'); condition.textContent = LABELS[row.label]?.name || row.label || 'Unknown';
+    const split = document.createElement('span'); split.textContent = row.split === 'holdout' ? 'Holdout' : 'Training';
+    const captured = document.createElement('span'); captured.textContent = shortDate(row.started_at);
+    const quality = document.createElement('span'); const cached = state.quality.get(row.filename); quality.className = `quality-value ${cached?.usable === true ? 'good' : cached?.usable === false ? 'bad' : ''}`; quality.textContent = cached ? cached.usable ? 'Usable' : 'Rejected' : 'Not checked';
+    const button = document.createElement('button'); button.className = 'button ghost'; button.textContent = cached ? 'Recheck' : 'Check'; button.onclick = () => checkQuality(row.filename, quality, button);
+    line.append(condition, split, captured, quality, button); target.append(line);
+  });
+}
+
+async function checkQuality(filename, label, button) {
+  try { button.disabled = true; button.textContent = 'Checking…'; label.textContent = 'Analyzing';
+    const result = await api(`/api/recordings/${encodeURIComponent(filename)}/quality`); state.quality.set(filename, result); renderRecordings();
+    toast(result.usable ? 'Recording passed every capture-quality gate.' : `Recording rejected: ${result.problems.join(' · ')}`, !result.usable);
+  } catch (error) { toast(error.message, true); renderRecordings(); }
+}
+
+function renderAll() { renderRooms(); renderSystem(); renderWorkflow(); renderLive(); renderRecordingStatus(); renderRecordings(); }
+
+async function refreshStatus() {
+  try { state.status = await api('/api/status'); renderSystem(); renderWorkflow(); renderLive(); renderRecordingStatus(); }
+  catch (error) { toast(`Backend unavailable: ${error.message}`, true); }
+}
+async function refreshRooms() {
+  try {
+    state.rooms = await api('/api/rooms');
+    if (!state.roomId || !state.rooms.some(room => room.id === state.roomId)) state.roomId = state.rooms.find(room => room.active)?.id || state.rooms[0]?.id || null;
+    if (state.roomId) localStorage.setItem('roomsense.room', state.roomId);
+    renderAll();
+  } catch (error) { toast(error.message, true); }
+}
+async function refreshRecordings() {
+  try { state.recordings = await api('/api/recordings'); renderRecordings(); } catch (error) { toast(error.message, true); }
+}
+async function refreshPorts() {
+  try {
+    const old = $('port').value, ports = await api('/api/ports'); $('port').replaceChildren();
+    const placeholder = document.createElement('option'); placeholder.value = ''; placeholder.textContent = ports.length ? 'Select receiver' : 'No physical receiver found'; $('port').append(placeholder);
+    ports.forEach(item => { const option = document.createElement('option'); option.value = item.device; option.textContent = `${item.device} · ${item.description}`; $('port').append(option); });
+    if ([...$('port').options].some(option => option.value === old)) $('port').value = old;
+  } catch (error) { toast(error.message, true); }
+}
+
+async function startRecording(label, split) {
+  const room = selectedRoom(); if (!room) return;
+  try {
+    await api('/api/recordings/start', {method: 'POST', body: JSON.stringify({label, room_id: room.id, split, notes: `${room.name} · ${split}`, delay_seconds: 10, duration_seconds: 30})});
+    switchStep(split === 'training' ? 'calibrate' : 'validate'); await refreshStatus();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function runRoomJob(kind) {
+  const room = selectedRoom(); if (!room) return;
+  try { await api(`/api/rooms/${room.id}/${kind}`, {method: 'POST'}); toast(kind === 'train' ? 'Training started. The current live model will not change.' : 'Holdout validation started.'); await refreshRooms(); }
+  catch (error) { toast(error.message, true); }
+}
+
+function openRoomDialog(edit = false) {
+  const room = selectedRoom(); $('roomForm').dataset.edit = edit && room ? room.id : '';
+  $('roomDialogTitle').textContent = edit ? 'Edit room' : 'Add a room'; $('roomName').value = edit ? room?.name || '' : ''; $('roomPlacement').value = edit ? room?.placement || '' : '';
+  $('roomDialog').showModal(); setTimeout(() => $('roomName').focus(), 50);
+}
+
+async function saveRoom(event) {
+  event.preventDefault();
+  if (!$('roomForm').reportValidity()) return;
+  const roomId = $('roomForm').dataset.edit, body = JSON.stringify({name: $('roomName').value.trim(), placement: $('roomPlacement').value.trim()});
+  try {
+    const room = await api(roomId ? `/api/rooms/${roomId}` : '/api/rooms', {method: roomId ? 'PATCH' : 'POST', body});
+    state.roomId = room.id; localStorage.setItem('roomsense.room', room.id); $('roomDialog').close(); await refreshRooms(); toast(roomId ? 'Room details updated.' : `${room.name} created. Start by connecting its receiver.`);
+  } catch (error) { toast(error.message, true); }
+}
+
+function connectEvents() {
+  document.querySelectorAll('.nav-item').forEach(button => button.onclick = () => switchView(button.dataset.view));
+  document.querySelectorAll('.step').forEach(button => button.onclick = () => switchStep(button.dataset.step));
+  document.querySelectorAll('.next-step').forEach(button => button.onclick = () => switchStep(button.dataset.next));
+  document.querySelectorAll('.filter').forEach(button => button.onclick = () => { state.filter = button.dataset.filter; document.querySelectorAll('.filter').forEach(item => item.classList.toggle('active', item === button)); renderRecordings(); });
+  $('mobileMenu').onclick = () => document.body.classList.toggle('menu-open');
+  $('roomPicker').onchange = event => selectRoom(event.target.value);
+  $('addRoomSmall').onclick = () => openRoomDialog(false); $('createFirstRoom').onclick = () => openRoomDialog(false); $('editRoom').onclick = () => openRoomDialog(true);
+  $('roomForm').onsubmit = event => {
+    if (event.submitter?.value === 'cancel') { event.preventDefault(); $('roomDialog').close(); return; }
+    saveRoom(event);
+  };
+  $('refresh').onclick = refreshPorts;
+  $('connect').onclick = async () => { try { if (!$('port').value) throw new Error('Select a physical receiver first.'); await api('/api/connect', {method: 'POST', body: JSON.stringify({port: $('port').value})}); toast('Receiver connected. Waiting for a stable CSI window.'); await refreshStatus(); } catch (error) { toast(error.message, true); } };
+  $('disconnect').onclick = async () => { try { await api('/api/disconnect', {method: 'POST'}); await refreshStatus(); } catch (error) { toast(error.message, true); } };
+  $('stopRecording').onclick = async () => { try { await api('/api/recordings/stop', {method: 'POST'}); await refreshStatus(); } catch (error) { toast(error.message, true); } };
+  $('trainModel').onclick = () => runRoomJob('train'); $('validateModel').onclick = () => runRoomJob('validate');
+  $('activateModel').onclick = async () => { const room = selectedRoom(); try { await api(`/api/rooms/${room.id}/activate`, {method: 'POST'}); toast(`${room.name} is now serving live decisions.`); await refreshStatus(); await refreshRooms(); switchView('live'); } catch (error) { toast(error.message, true); } };
+  $('openDiagnostics').onclick = () => $('diagnosticsDialog').showModal(); $('refreshRecordings').onclick = refreshRecordings;
+}
+
+function connectWebSocket() {
+  const protocol = location.protocol === 'https:' ? 'wss' : 'ws'; const socket = new WebSocket(`${protocol}://${location.host}/ws/live`);
+  socket.onmessage = event => { const message = JSON.parse(event.data); if (message.type === 'packet') state.latestPacket = message.data; else if (message.type === 'prediction') drawPrediction(message.data); };
+  socket.onclose = () => setTimeout(connectWebSocket, 1200);
+}
+
+async function boot() {
+  connectEvents(); await Promise.all([refreshPorts(), refreshRecordings(), refreshStatus(), refreshRooms()]);
+  connectWebSocket(); setInterval(refreshStatus, 1000); setInterval(refreshRooms, 3000);
+}
+boot();

@@ -23,7 +23,9 @@ class Recorder:
         self.record_until = None
         self.last_result = None
 
-    def start(self, label: str, notes: str, delay_seconds: int = 10, duration_seconds: int = 30) -> dict:
+    def start(self, label: str, notes: str, delay_seconds: int = 10,
+              duration_seconds: int = 30, room_id: str | None = None,
+              split: str = "training") -> dict:
         if label not in LABELS:
             raise ValueError("invalid recording label")
         if delay_seconds < 0 or delay_seconds > 60:
@@ -39,6 +41,7 @@ class Recorder:
             safe_label = re.sub(r"[^a-z0-9_-]", "_", label)
             path = self.directory / f"{starts_at.strftime('%Y%m%dT%H%M%S.%fZ')}_{safe_label}.jsonl"
             self.info = {"filename": path.name, "label": label, "notes": notes,
+                         "room_id": room_id, "split": split,
                          "requested_at": now.isoformat(), "started_at": starts_at.isoformat(),
                          "ends_at": ends_at.isoformat(), "packet_count": 0,
                          "delay_seconds": delay_seconds, "duration_seconds": duration_seconds}
@@ -60,6 +63,8 @@ class Recorder:
                 self.file = path.open("x", encoding="utf-8")
             row = packet.live_dict() | {
                 "session_label": self.info["label"], "session_notes": self.info["notes"],
+                "session_room_id": self.info.get("room_id"),
+                "session_split": self.info.get("split"),
                 "session_timestamp": self.info["started_at"], "raw_csi": packet.raw_csi,
                 "rate": packet.rate, "sig_len": packet.sig_len, "rx_state": packet.rx_state,
                 "declared_len": packet.declared_len, "first_word": packet.first_word,
@@ -115,13 +120,15 @@ class Recorder:
                     first = json.loads(handle.readline())
                 result.append({"filename": path.name, "size_bytes": path.stat().st_size,
                                "label": first.get("session_label"), "notes": first.get("session_notes"),
+                               "room_id": first.get("session_room_id"),
+                               "split": first.get("session_split", "training"),
                                "started_at": first.get("session_timestamp")})
             except (OSError, json.JSONDecodeError):
                 result.append({"filename": path.name, "error": "unreadable recording"})
         return result
 
     def load(self, filename: str, limit: int = 5000) -> dict:
-        path = self._recording_path(filename)
+        path = self.recording_path(filename)
         packets = []
         with path.open(encoding="utf-8") as handle:
             for i, line in enumerate(handle):
@@ -130,7 +137,7 @@ class Recorder:
                 packets.append(json.loads(line))
         return {"filename": filename, "packets": packets, "truncated": len(packets) == limit}
 
-    def _recording_path(self, filename: str) -> Path:
+    def recording_path(self, filename: str) -> Path:
         path = (self.directory / filename).resolve()
         if path.parent != self.directory.resolve() or path.suffix != ".jsonl" or not path.is_file():
             raise FileNotFoundError(filename)
@@ -142,7 +149,7 @@ class Recorder:
         Array/object values remain valid JSON inside their CSV cells. csv.writer
         handles the quoting, so commas in CSI arrays cannot shift columns.
         """
-        path = self._recording_path(filename)
+        path = self.recording_path(filename)
         fields = [
             "session_label", "session_notes", "session_timestamp", "received_at",
             "packet_id", "esp_timestamp", "mac", "rssi", "rate", "noise_floor",

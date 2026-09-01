@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -11,13 +12,17 @@ from .models import CSIPacket
 from .predictor import Predictor
 from .recorder import Recorder
 from .replay import Replayer
+from .room_manager import RoomManager
 from .serial_reader import SerialReader, available_ports
+from src.dataset import _quality
+from src.esp_csi import load_esp32_csi_csv
 
 logging.basicConfig(level=logging.INFO)
 ROOT = Path(__file__).resolve().parent.parent
-app = FastAPI(title="WiFi CSI Lab")
+app = FastAPI(title="RoomSense")
 recorder = Recorder(ROOT / "recordings")
 predictor = Predictor(ROOT / "artifacts" / "esp32_model.joblib")
+rooms = RoomManager(ROOT, recorder, predictor)
 clients: set[WebSocket] = set()
 loop: asyncio.AbstractEventLoop | None = None
 
@@ -74,6 +79,18 @@ class RecordBody(BaseModel):
     notes: str = Field(default="", max_length=2000)
     delay_seconds: int = Field(default=10, ge=0, le=60)
     duration_seconds: int = Field(default=30, ge=1, le=3600)
+    room_id: str | None = None
+    split: str = "training"
+
+
+class RoomBody(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    placement: str = Field(default="", max_length=500)
+
+
+class RoomUpdateBody(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    placement: str | None = Field(default=None, max_length=500)
 
 
 @app.on_event("startup")
@@ -96,7 +113,44 @@ def ports(): return available_ports()
 @app.get("/api/status")
 def status():
     return {"serial": reader.status(), "recording": recorder.status(),
-            "prediction": predictor.status(), "replay": replayer.status()}
+            "prediction": predictor.status(), "replay": replayer.status(),
+            "active_room": next((room for room in rooms.list() if room.get("active")), None)}
+
+
+@app.get("/api/rooms")
+def list_rooms(): return rooms.list()
+
+
+@app.post("/api/rooms")
+def create_room(body: RoomBody):
+    return rooms.create(body.name, body.placement)
+
+
+@app.patch("/api/rooms/{room_id}")
+def update_room(room_id: str, body: RoomUpdateBody):
+    try: return rooms.update(room_id, name=body.name, placement=body.placement)
+    except KeyError as exc: raise HTTPException(404, "room not found") from exc
+
+
+@app.post("/api/rooms/{room_id}/train")
+def train_room(room_id: str):
+    try: return rooms.start_job(room_id, "train")
+    except KeyError as exc: raise HTTPException(404, "room not found") from exc
+    except RuntimeError as exc: raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/rooms/{room_id}/validate")
+def validate_room(room_id: str):
+    try: return rooms.start_job(room_id, "validate")
+    except KeyError as exc: raise HTTPException(404, "room not found") from exc
+    except RuntimeError as exc: raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/rooms/{room_id}/activate")
+def activate_room(room_id: str):
+    try: return rooms.activate(room_id)
+    except KeyError as exc: raise HTTPException(404, "room not found") from exc
+    except RuntimeError as exc: raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/model/reload")
@@ -144,7 +198,21 @@ def disconnect():
 
 @app.post("/api/recordings/start")
 def start_recording(body: RecordBody):
-    try: return recorder.start(body.label, body.notes, body.delay_seconds, body.duration_seconds)
+    serial = reader.status()
+    if not serial.get("connected"):
+        raise HTTPException(400, "connect the ESP32 receiver before recording")
+    if serial.get("packet_count", 0) < 20:
+        raise HTTPException(400, "wait for at least 20 CSI packets before recording")
+    age = serial.get("seconds_since_last_packet")
+    if age is None or age > 1.5:
+        raise HTTPException(400, "CSI stream is stale; reconnect the receiver")
+    if body.split not in {"training", "holdout"}:
+        raise HTTPException(400, "recording split must be training or holdout")
+    if body.room_id:
+        try: rooms.get(body.room_id)
+        except KeyError as exc: raise HTTPException(404, "room not found") from exc
+    try: return recorder.start(body.label, body.notes, body.delay_seconds,
+                               body.duration_seconds, body.room_id, body.split)
     except (ValueError, RuntimeError, OSError) as exc: raise HTTPException(400, str(exc)) from exc
 
 
@@ -160,6 +228,21 @@ def recordings(): return recorder.list()
 def recording(filename: str):
     try: return recorder.load(filename)
     except FileNotFoundError as exc: raise HTTPException(404, "recording not found") from exc
+
+
+@app.get("/api/recordings/{filename}/quality")
+def recording_quality(filename: str):
+    try:
+        path = recorder.recording_path(filename)
+        out = load_esp32_csi_csv(path, valid_subcarriers="reference", verbose=False)
+        q = _quality(out, out["amp"])
+        q["filename"] = filename
+        return {key: (None if isinstance(value, float) and not math.isfinite(value) else value)
+                for key, value in q.items()}
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "recording not found") from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, f"quality check failed: {exc}") from exc
 
 
 @app.get("/api/recordings/{filename}/csv")

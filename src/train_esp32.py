@@ -51,6 +51,7 @@ WHAT THIS SCRIPT SEARCHES OVER, AND WHY EACH AXIS EXISTS
 
 import argparse
 import os
+import shutil
 from datetime import datetime, timezone
 
 import joblib
@@ -269,7 +270,8 @@ def rule(t):
 
 
 def run(save=True, augment_intel=False, window_seconds=None, overlap=None,
-        force=False, data_dir=None, include_bad=False, save_anyway=False):
+        force=False, data_dir=None, include_bad=False, save_anyway=False,
+        model_path=MODEL_PATH):
     rule("1  DATASET")
     kw = {}
     if window_seconds is not None:
@@ -460,14 +462,23 @@ def run(save=True, augment_intel=False, window_seconds=None, overlap=None,
         "augmented_with_intel": bool(augment is not None
                                      and best["feature_set"] == "scale_free"),
         "trained_at": datetime.now(timezone.utc).isoformat(),
+        "training_data_dir": os.path.realpath(data_dir) if data_dir else None,
     }
     if save and not deployable and not save_anyway:
         print(f"\n  NOT SAVED: this model is not deployable (see section 3).")
         print(f"  Re-run with more data. Pass --save-anyway to override.")
     elif save:
-        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-        joblib.dump(bundle, MODEL_PATH)
-        print(f"\n  saved -> {os.path.relpath(MODEL_PATH, _ROOT)}")
+        model_path = os.path.realpath(model_path)
+        os.makedirs(os.path.dirname(model_path), exist_ok=True)
+        if os.path.exists(model_path):
+            stem, ext = os.path.splitext(model_path)
+            backup = f"{stem}.previous{ext}"
+            shutil.copy2(model_path, backup)
+            print(f"\n  previous model backed up -> {os.path.relpath(backup, _ROOT)}")
+        temporary = f"{model_path}.tmp"
+        joblib.dump(bundle, temporary)
+        os.replace(temporary, model_path)
+        print(f"\n  saved atomically -> {os.path.relpath(model_path, _ROOT)}")
         print(f"  The baseline ships WITH the model. A model without its site")
         print(f"  baseline is unusable -- predict_presence() raises rather than guess.")
     return bundle
@@ -487,11 +498,13 @@ def main():
     ap.add_argument("--include-bad", action="store_true",
                     help="train on quality-flagged recordings too (contaminates results)")
     ap.add_argument("--force", action="store_true", help="rebuild the feature cache")
+    ap.add_argument("--output", default=MODEL_PATH,
+                    help="model bundle path (existing file is backed up before replacement)")
     a = ap.parse_args()
     run(save=not a.no_save, augment_intel=a.augment_intel,
         window_seconds=a.window_seconds, overlap=a.overlap,
         force=a.force, data_dir=a.data_dir, include_bad=a.include_bad,
-        save_anyway=a.save_anyway)
+        save_anyway=a.save_anyway, model_path=a.output)
 
 
 if __name__ == "__main__":

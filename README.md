@@ -261,6 +261,76 @@ recordings/         raw JSONL written by the dashboard
 
 Everything from here is one cycle: record, check, train, read the report.
 
+### Demo-room workflow (train first, prove second)
+
+The fitted ESP32 model is site-specific. Moving the boards or changing rooms
+invalidates its quiet baseline, so the verdict shown while collecting in a new
+room is not evidence. Ground truth is the label selected by the operator.
+
+The dashboard now manages this workflow directly. Create a room profile, then
+use **Room setup** to connect hardware, collect room-owned training and holdout
+recordings, train, validate, and activate that room's model. The files under
+`rooms/<room-id>/` are generated working data and model versions; raw captures
+remain in `recordings/`. A validated model must be explicitly activated before
+it can replace the live model. The command-line flow below remains available for
+inspection and recovery.
+
+1. Put the boards in their final positions and restart the backend. The port
+   picker now shows physical USB serial devices only. Wait for the **Stream**
+   badge; hover it for rate, jitter, RSSI, and gain warnings.
+2. Record one genuinely empty 30-second file. Under **Previous recordings**,
+   select it and click **Check training quality**. Do not collect a batch until
+   `usable` is `true`.
+3. Mark the start of a clean training batch:
+
+   ```bash
+   mkdir -p demo_room_data
+   touch demo_room_data/.start
+   ```
+
+4. Without moving the boards, record ten interleaved cycles of `empty`,
+   `occupied_still`, and `occupied_moving`. Every file must contain one pure
+   condition for all 30 seconds.
+5. Copy only this batch and train it:
+
+   ```bash
+   find recordings -maxdepth 1 -name '*.jsonl' \
+     -newer demo_room_data/.start \
+     -exec cp {} demo_room_data/ \;
+
+   arch -arm64 .venv/bin/python -m src.train_esp32 \
+     --data-dir demo_room_data --force
+   ```
+
+   Bad captures are excluded. A model that misses the HOME-safety floor or
+   almost never says AWAY is not saved. When a model is saved, the old bundle is
+   backed up as `artifacts/esp32_model.previous.joblib` and the replacement is
+   atomic.
+6. Reload the model, then create a new marker before collecting holdout files:
+
+   ```bash
+   curl -X POST http://127.0.0.1:8000/api/model/reload
+   mkdir -p demo_holdout
+   touch demo_holdout/.start
+   ```
+
+7. Record at least three new files per condition. Copy them to `demo_holdout/`
+   with the same `find ... -newer ... -exec cp` pattern, then evaluate the exact
+   serving path:
+
+   ```bash
+   arch -arm64 .venv/bin/python -m src.evaluate_live demo_holdout
+   ```
+
+   This fails if a capture is low quality, a recording has the wrong majority,
+   condition accuracy misses its safety target, or the wrong state persists for
+   more than three seconds.
+
+Only after those holdouts pass is the live entrance/exit demonstration evidence:
+an actually empty room should settle to AWAY, entry should settle to HOME, a
+still person should remain HOME, and complete exit should return to AWAY. The
+transition takes roughly one full 2.56-second window.
+
 ### 1. Record and export
 
 Use the dashboard (above). One label per 30-second recording. Export each to

@@ -37,6 +37,7 @@ THREE DECISIONS HERE MATTER MORE THAN THE MODEL
 """
 
 import glob
+import json
 import os
 import re
 
@@ -85,6 +86,14 @@ _MOVING_WORDS = ("moving", "move", "walking", "walk", "motion", "active", "pacin
 _OCCUPIED_WORDS = ("occupied", "present", "person", "people", "home", "human")
 
 CONDITIONS = ("empty", "occupied_still", "occupied_moving", "occupied")
+
+
+def source_manifest(paths):
+    """Stable cache identity for an exact set of source files."""
+    return json.dumps([
+        [os.path.realpath(p), os.path.getsize(p), os.stat(p).st_mtime_ns]
+        for p in paths
+    ], separators=(",", ":"))
 
 
 def normalize_label(raw):
@@ -185,16 +194,7 @@ def build(data_dir=DATA_DIR, window_seconds=WINDOW_SECONDS, overlap=OVERLAP,
       fs         (n_windows,)     packet rate of the source recording
       quality    {filename: {...}} per-recording QC, including skipped files
     """
-    if cache and os.path.exists(cache) and not force:
-        z = np.load(cache, allow_pickle=True)
-        if (float(z["window_seconds"]) == window_seconds
-                and float(z["overlap"]) == overlap
-                and bool(z["exclude_bad"]) == exclude_bad):
-            out = {k: z[k] for k in ("X", "y", "condition", "group", "order", "fs")}
-            out["quality"] = z["quality"].item()
-            return out
-
-    dirs = [data_dir] if data_dir else SOURCE_DIRS
+    dirs = [os.fspath(data_dir)] if data_dir else SOURCE_DIRS
     paths, seen_stems = [], set()
     for d in dirs:
         for ext in ("*.jsonl", "*.csv"):        # JSONL first: it is the native form
@@ -210,6 +210,20 @@ def build(data_dir=DATA_DIR, window_seconds=WINDOW_SECONDS, overlap=OVERLAP,
             f"no recordings found in {', '.join(dirs)}. Record a session in the "
             f"dashboard (it writes recordings/*.jsonl automatically), or export a "
             f"session to CSV and drop it in data/.")
+
+    # A cache is valid only for these exact source files. Previously, a run with
+    # --data-dir could silently reuse features built from a different room.
+    manifest = source_manifest(paths)
+    if cache and os.path.exists(cache) and not force:
+        with np.load(cache, allow_pickle=True) as z:
+            if ("source_manifest" in z.files
+                    and str(z["source_manifest"].item()) == manifest
+                    and float(z["window_seconds"]) == window_seconds
+                    and float(z["overlap"]) == overlap
+                    and bool(z["exclude_bad"]) == exclude_bad):
+                out = {k: z[k] for k in ("X", "y", "condition", "group", "order", "fs")}
+                out["quality"] = z["quality"].item()
+                return out
 
     X, y, condition, group, order, fsv = [], [], [], [], [], []
     quality, skipped = {}, []
@@ -274,6 +288,7 @@ def build(data_dir=DATA_DIR, window_seconds=WINDOW_SECONDS, overlap=OVERLAP,
             cache, **{k: v for k, v in res.items() if k != "quality"},
             quality=np.array(quality, dtype=object),
             feature_names=np.array(FEATURE_NAMES),
+            source_manifest=np.array(manifest),
             window_seconds=window_seconds, overlap=overlap, exclude_bad=exclude_bad)
     return res
 

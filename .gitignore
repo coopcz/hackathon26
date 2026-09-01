@@ -3,3 +3,8 @@ __pycache__/
 .venv/
 .DS_Store
 data/
+recordings/*.jsonl
+recordings/quarantine/
+demo_room_data/
+demo_holdout/
+rooms/

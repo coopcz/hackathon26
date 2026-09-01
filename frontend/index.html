@@ -1,11 +1,107 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WiFi CSI Lab</title><link rel="stylesheet" href="/static/styles.css"><script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script></head>
-<body><header><div><h1>WiFi CSI Lab</h1><p>Live, board-supplied CSI · no simulated data</p></div><span id="status" class="badge off">Disconnected</span></header>
-<main><section class="controls"><select id="port"><option value="">Select RX serial port</option></select><button id="refresh">Refresh ports</button><button id="connect" class="primary">Connect</button><button id="disconnect">Disconnect</button><span>Packets <b id="packets">0</b></span><span>Rate <b id="rate">0.0</b>/s</span><span>Rejected <b id="rejected">0</b></span></section><div id="error" role="alert"></div><div id="nodata">No CSI data received from the board.</div>
-<section class="verdict"><div class="verdict-head"><div class="vitem"><label>Room</label><strong id="presence">—</strong></div><div class="vitem"><label>Confidence</label><strong id="confidence">—</strong></div><div class="vitem"><label>Air conditioning</label><span id="ac" class="badge off">—</span></div><span id="replaybadge" class="badge replay" hidden>REPLAY</span></div><p id="why">No verdict yet.</p><small id="modelinfo">Checking for a trained model…</small><div id="presenceplot"></div></section>
-<section class="replay"><div><h2>Replay a recording</h2><p>Feeds a saved session's real packets through the live model. Nothing is simulated, and a replay is never written to a recording.</p></div><div class="quick"><button class="demo" data-label="empty">Empty room</button><button class="demo" data-label="occupied_still">Occupied · still</button><button class="demo" data-label="occupied_moving">Occupied · moving</button></div><select id="replayfile"><option value="">Choose a recording</option></select><label>Speed <input id="replayspeed" type="number" min="0.5" max="10" step="0.5" value="1"></label><button id="replaystart" class="primary">Start replay</button><button id="replaystop">Stop</button><strong id="replaystate">Idle</strong></section>
-<section class="cards" id="metadata"><article><label>RSSI</label><strong id="rssi">—</strong></article><article><label>Noise floor</label><strong id="noise">—</strong></article><article><label>AGC gain</label><strong id="agc">—</strong></article><article><label>FFT gain</label><strong id="fft">—</strong></article><article><label>Channel</label><strong id="channel">—</strong></article><article><label>CSI complex values</label><strong id="length">—</strong></article></section>
-<section class="record"><div><h2>Recording</h2><p>10-second setup countdown → 30-second recording → automatic stop. Raw I/Q and board metadata are always preserved.</p></div><select id="label"><option>empty</option><option>occupied_still</option><option>occupied_moving</option></select><input id="notes" placeholder="Session notes"><button id="start" class="danger">Start recording</button><button id="stop">Cancel / Stop</button><strong id="recstate">Not recording</strong></section>
-<section class="preprocess"><h2>Visualization controls</h2><label>Subcarriers <input id="from" type="number" min="0" value="0"> to <input id="to" type="number" min="1" placeholder="end"></label><label><input id="normalize" type="checkbox"> Normalize latest frame</label><label>Rolling mean <input id="smooth" type="number" min="1" max="51" value="1"></label><label><input id="removezero" type="checkbox"> Hide zero-only values</label><small>Visualization only; recordings remain raw.</small></section>
-<section class="features cards"><article><label>Mean amplitude</label><strong id="mean">—</strong></article><article><label>Std amplitude</label><strong id="std">—</strong></article><article><label>Median amplitude</label><strong id="median">—</strong></article><article><label>Variance</label><strong id="variance">—</strong></article><article><label>Frame difference</label><strong id="difference">—</strong></article></section>
-<section class="grid"><div class="plot"><h2>CSI Amplitude — Latest Frame</h2><div id="amplitude"></div></div><div class="plot"><h2>Amplitude History</h2><div id="history"></div></div><div class="plot"><h2>Motion Score <small>change indicator only — not occupancy classification</small></h2><div id="motion"></div></div><div class="plot"><h2>RSSI History</h2><div id="rssihistory"></div></div></section>
-<section class="archive"><h2>Previous recordings</h2><button id="reload">Refresh list</button><select id="recordings"><option value="">Choose a recording</option></select><button id="load">Load & inspect</button><button id="export">Export CSV</button><pre id="details">No recording loaded.</pre><div id="replay"></div></section></main><script src="/static/app.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#090b0f">
+  <title>Roomsense — Occupancy Intelligence</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><div><strong>ROOMSENSE</strong><small>Spatial intelligence</small></div></div>
+      <nav aria-label="Primary navigation">
+        <button class="nav-item active" data-view="setup"><span class="nav-icon">01</span><span>Room setup</span></button>
+        <button class="nav-item" data-view="live"><span class="nav-icon">02</span><span>Live monitor</span></button>
+        <button class="nav-item" data-view="data"><span class="nav-icon">03</span><span>Recordings</span></button>
+      </nav>
+      <div class="rooms-nav">
+        <div class="section-label"><span>Rooms</span><button id="addRoomSmall" class="icon-button" aria-label="Add room">+</button></div>
+        <div id="roomList" class="room-list"></div>
+      </div>
+      <div class="rail-status"><span id="globalDot" class="status-dot neutral"></span><div><strong id="globalStatus">System offline</strong><small id="globalDetail">No receiver connected</small></div></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <button id="mobileMenu" class="icon-button menu-button" aria-label="Open navigation">☰</button>
+        <div class="room-context"><small>Active workspace</small><select id="roomPicker" aria-label="Select room"><option value="">No room selected</option></select></div>
+        <div class="top-actions"><span id="modelBadge" class="badge neutral">No room model</span><span id="connectionBadge" class="badge neutral"><i></i> Offline</span></div>
+      </header>
+
+      <div id="toast" role="status" aria-live="polite"></div>
+      <section id="emptyState" class="empty-state" hidden>
+        <div class="empty-radar" aria-hidden="true"><i></i><i></i><i></i><b></b></div>
+        <p class="eyebrow">Room onboarding</p><h1>Map your first room.</h1>
+        <p>Create a room profile, connect its sensor pair, then collect a short calibration set. Every model stays tied to the space that produced it.</p>
+        <button id="createFirstRoom" class="button primary">Create a room <span>→</span></button>
+      </section>
+
+      <section id="setupView" class="view active">
+        <div class="page-heading"><div><p class="eyebrow">Room commissioning</p><h1 id="setupRoomName">Room setup</h1><p id="setupSubtitle">Connect hardware, map room states, and validate a model before activation.</p></div><div class="completion"><span id="completionValue">0%</span><small>setup complete</small></div></div>
+        <div class="workflow">
+          <div class="stepper" role="tablist" aria-label="Room setup steps">
+            <button class="step active" data-step="hardware"><span>01</span><div><strong>Hardware</strong><small>Connect and verify signal</small></div><i></i></button>
+            <button class="step" data-step="calibrate"><span>02</span><div><strong>Calibrate</strong><small>Map three room conditions</small></div><i></i></button>
+            <button class="step" data-step="train"><span>03</span><div><strong>Train</strong><small>Build a room-specific model</small></div><i></i></button>
+            <button class="step" data-step="validate"><span>04</span><div><strong>Validate</strong><small>Test on unseen recordings</small></div><i></i></button>
+            <button class="step" data-step="activate"><span>05</span><div><strong>Activate</strong><small>Begin live monitoring</small></div><i></i></button>
+          </div>
+          <div class="stage">
+            <article class="stage-panel active" data-panel="hardware">
+              <div class="stage-head"><div><span class="stage-number">Step 01</span><h2>Connect the room sensor</h2><p>The receiver streams CSI to this computer. Keep both boards fixed after calibration starts.</p></div><span id="hardwareState" class="state-label neutral">Not connected</span></div>
+              <div class="device-connect"><label><span>Receiver serial port</span><select id="port"><option value="">No physical receiver found</option></select></label><button id="refresh" class="button secondary">Scan ports</button><button id="connect" class="button primary">Connect receiver</button><button id="disconnect" class="button ghost" hidden>Disconnect</button></div>
+              <div class="signal-strip"><div><span>Stream</span><strong id="streamQuality">Waiting</strong><small id="streamReason">Connect a receiver to begin</small></div><div><span>Packet rate</span><strong><b id="packetRate">—</b> <em>pkt/s</em></strong><small>Stable delivery target</small></div><div><span>Signal</span><strong><b id="rssi">—</b> <em>dBm</em></strong><small>Target −40 to −75 dBm</small></div><div><span>CSI length</span><strong id="csiLength">—</strong><small>Expected 256 values</small></div></div>
+              <div class="placement-note"><span>Placement</span><p id="placementText">No placement notes saved for this room.</p><button id="editRoom" class="text-button">Edit room details</button></div>
+              <div class="stage-footer"><span>Once the stream is healthy, continue to calibration.</span><button class="button primary next-step" data-next="calibrate">Continue <span>→</span></button></div>
+            </article>
+
+            <article class="stage-panel" data-panel="calibrate">
+              <div class="stage-head"><div><span class="stage-number">Step 02</span><h2>Map the room states</h2><p>Record pure 30-second examples. Ten per condition gives the model a strong room baseline.</p></div><span class="state-label cyan">Training set</span></div>
+              <div id="trainingConditions" class="condition-list"></div>
+              <div id="recordingBar" class="recording-bar" hidden><span class="record-pulse"></span><div><strong id="recordingTitle">Preparing recording</strong><small id="recordingDetail">10-second setup countdown</small></div><button id="stopRecording" class="button ghost">Cancel</button></div>
+              <div class="stage-footer"><span>Interleave conditions to reduce time-of-day drift.</span><button class="button primary next-step" data-next="train">Review training <span>→</span></button></div>
+            </article>
+
+            <article class="stage-panel" data-panel="train">
+              <div class="stage-head"><div><span class="stage-number">Step 03</span><h2>Train this room’s model</h2><p>Only this room’s accepted training recordings are included. Other rooms remain isolated.</p></div><span id="trainState" class="state-label neutral">Not trained</span></div>
+              <div class="model-summary"><div class="model-orbit"><span id="trainPercent">—</span><small>coverage</small></div><div><p class="eyebrow">Dataset readiness</p><h3 id="trainingReadiness">Collect calibration recordings</h3><p id="trainingCopy">We recommend ten clean sessions for each room condition.</p></div></div>
+              <div id="trainingCounts" class="mini-counts"></div>
+              <div id="trainJob" class="job-output" hidden><div><span class="spinner"></span><strong>Training room model</strong></div><pre id="trainOutput"></pre></div>
+              <div class="stage-footer"><span>The current live model is preserved until a new one is validated.</span><button id="trainModel" class="button primary">Train room model</button></div>
+            </article>
+
+            <article class="stage-panel" data-panel="validate">
+              <div class="stage-head"><div><span class="stage-number">Step 04</span><h2>Prove it on unseen data</h2><p>Holdout recordings are never used for training. They test the exact path used by the live feed.</p></div><span id="validationState" class="state-label neutral">Not validated</span></div>
+              <div id="holdoutConditions" class="condition-list compact"></div><div id="validationReport" class="validation-report" hidden></div>
+              <div class="stage-footer"><span>Required: three clean holdouts per condition.</span><button id="validateModel" class="button primary">Run validation</button></div>
+            </article>
+
+            <article class="stage-panel" data-panel="activate">
+              <div class="stage-head"><div><span class="stage-number">Step 05</span><h2>Activate live monitoring</h2><p>Activation makes this validated room model the source of live occupancy decisions.</p></div><span id="activationState" class="state-label neutral">Inactive</span></div>
+              <div class="activation-hero"><span class="activation-ring"><i></i></span><div><p class="eyebrow">Deployment gate</p><h3 id="activationTitle">Validation required</h3><p id="activationCopy">Complete calibration, training, and holdout validation first.</p></div></div>
+              <div class="stage-footer"><span id="modelIdentity">No room-specific model available.</span><button id="activateModel" class="button primary">Activate model</button></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="liveView" class="view">
+        <div class="page-heading live-heading"><div><p class="eyebrow">Live occupancy</p><h1 id="liveRoomName">No active room</h1><p id="liveFreshness">Waiting for an activated room model and receiver.</p></div><span id="liveSignal" class="state-label neutral">Offline</span></div>
+        <div class="live-layout"><div id="occupancyField" class="occupancy-field unavailable"><div class="radar-lines" aria-hidden="true"><i></i><i></i><i></i></div><div class="occupancy-copy"><span id="occupancyKicker">Room state</span><strong id="presence">—</strong><p id="presenceReason">No current occupancy decision</p></div><div class="confidence"><span>Model confidence</span><strong id="confidence">—</strong><div><i id="confidenceFill"></i></div></div></div><aside class="live-context"><div class="context-block"><span class="section-label">System state</span><dl><div><dt>Room model</dt><dd id="liveModel">None active</dd></div><div><dt>Calibration</dt><dd id="liveCalibration">Not validated</dd></div><div><dt>Stream quality</dt><dd id="liveQuality">Offline</dd></div><div><dt>Packet rate</dt><dd id="liveRate">—</dd></div></dl></div><div class="context-block"><span class="section-label">Recent decisions</span><div id="decisionTimeline" class="decision-timeline"><p>No live decisions yet.</p></div></div><button id="openDiagnostics" class="button secondary full">Open signal diagnostics</button></aside></div>
+      </section>
+
+      <section id="dataView" class="view">
+        <div class="page-heading"><div><p class="eyebrow">Room data</p><h1>Recordings</h1><p>Review capture ownership and quality without mixing room datasets.</p></div><button id="refreshRecordings" class="button secondary">Refresh</button></div>
+        <div class="data-filters"><button class="filter active" data-filter="all">All</button><button class="filter" data-filter="training">Training</button><button class="filter" data-filter="holdout">Holdout</button></div>
+        <div class="recording-table"><div class="table-head"><span>Condition</span><span>Dataset</span><span>Captured</span><span>Quality</span><span></span></div><div id="recordingRows"></div></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="roomDialog"><form method="dialog" id="roomForm"><div class="dialog-head"><div><p class="eyebrow">Room profile</p><h2 id="roomDialogTitle">Add a room</h2></div><button value="cancel" class="icon-button" aria-label="Close">×</button></div><label><span>Room name</span><input id="roomName" maxlength="80" placeholder="Presentation room" required></label><label><span>Sensor placement</span><textarea id="roomPlacement" maxlength="500" placeholder="Boards 8 ft apart, chest height, diagonal across entry path"></textarea></label><div class="dialog-actions"><button value="cancel" class="button ghost">Cancel</button><button id="saveRoom" value="default" class="button primary">Save room</button></div></form></dialog>
+  <dialog id="diagnosticsDialog"><div class="dialog-head"><div><p class="eyebrow">Live receiver</p><h2>Signal diagnostics</h2></div><button class="icon-button" onclick="this.closest('dialog').close()" aria-label="Close">×</button></div><dl class="diagnostics"><div><dt>Packets received</dt><dd id="diagPackets">0</dd></div><div><dt>Rejected packets</dt><dd id="diagRejected">0</dd></div><div><dt>RSSI</dt><dd id="diagRssi">—</dd></div><div><dt>Host jitter</dt><dd id="diagJitter">—</dd></div><div><dt>AGC deviation</dt><dd id="diagAgc">—</dd></div><div><dt>CSI length</dt><dd id="diagLength">—</dd></div></dl><p id="diagProblems" class="diagnostic-note">Connect a receiver to inspect the stream.</p></dialog>
+  <script src="/static/app.js"></script>
+</body>
+</html>
