@@ -1,17 +1,13 @@
-"""Train and honestly evaluate the presence-detection baseline.
+"""Shared estimators, metrics and split helpers.
 
-TWO EVALUATIONS ARE REPORTED, DELIBERATELY.
+Used by both src/train_esp32.py (the deployed ESP32 model) and src/intel/demo.py
+(the reference experiment).
 
-The dataset is 26 continuous ~3-minute recordings, one per (room, occupancy).
-Windows cut from the same recording are highly correlated - same room, same
-people, same furniture, seconds apart.  A random train/test split therefore puts
-near-duplicate windows on both sides and reports an accuracy that is mostly
-memorisation.  That number is the one most papers quote and it is optimistic.
-
-So we also run leave-one-room-out: train on two rooms, test on the third, which
-the model has never seen.  That is the number that actually predicts "will this
-work in a house it was not trained in" - the question that matters for shipping
-this on an ESP32 in somebody's home.
+THE RECURRING TRAP THIS MODULE EXISTS TO AVOID: windows cut from one continuous
+recording are near-duplicates - same room, same people, same furniture, seconds
+apart.  A random train/test split puts them on both sides and reports an accuracy
+that is mostly memorisation.  Every honest evaluation here splits on a GROUPING
+column instead: `site` for the Intel rooms, the source recording for the ESP32.
 """
 
 import numpy as np
@@ -21,7 +17,6 @@ from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_s
                              confusion_matrix, classification_report)
 from sklearn.inspection import permutation_importance
 
-from .build_dataset import build
 from .features import (FEATURE_NAMES, FEATURE_FAMILY, SCALE_FREE_FEATURES,
                        fit_site_baseline, apply_site_baseline)
 
@@ -74,11 +69,11 @@ def evaluate_random_split(X, y, test_size=0.2):
     return rf, (Xtr, Xte, ytr, yte)
 
 
-def evaluate_leave_one_room_out(X, y, room):
+def evaluate_leave_one_site_out(X, y, site):
     """Realistic cross-environment split: train on 2 rooms, test on the held-out one."""
     results = {}
-    for held in np.unique(room):
-        tr, te = room != held, room == held
+    for held in np.unique(site):
+        tr, te = site != held, site == held
         rf = make_rf().fit(X[tr], y[tr])
         pred = rf.predict(X[te])
         results[held] = {"metrics": metrics(y[te], pred), "y_true": y[te], "y_pred": pred,
@@ -95,21 +90,21 @@ def family_importance(names, importances):
     return dict(sorted(agg.items(), key=lambda kv: -kv[1]))
 
 
-def build_calibrated(X, y, room, feature_names):
+def build_calibrated(X, y, site, feature_names):
     """Apply per-site baseline calibration to every room independently."""
     Xc = np.zeros((len(X), len(SCALE_FREE_FEATURES)))
-    for r in np.unique(room):
-        m = room == r
+    for r in np.unique(site):
+        m = site == r
         # baseline is fitted on that room's own UNLABELLED windows only
         Xc[m] = apply_site_baseline(X[m], list(feature_names), fit_site_baseline(X[m], list(feature_names)))
     return Xc
 
 
-def evaluate_calibrated_loro(Xc, y, room):
+def evaluate_calibrated_loso(Xc, y, site):
     """Leave-one-room-out on the calibrated scale-free features: the deployment model."""
     results = {}
-    for held in np.unique(room):
-        tr, te = room != held, room == held
+    for held in np.unique(site):
+        tr, te = site != held, site == held
         rf = make_rf().fit(Xc[tr], y[tr])
         pred = rf.predict(Xc[te])
         results[held] = {"metrics": metrics(y[te], pred), "y_true": y[te], "y_pred": pred}

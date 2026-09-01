@@ -72,7 +72,38 @@ backend then closes the file automatically, so walking back to the computer
 after completion does not contaminate an empty-room trial. **Cancel / Stop** is
 still available to discard the countdown or end a recording early.
 
-#### 6. Find or export the data
+#### 6. See the live verdict
+
+Once a model exists (`artifacts/esp32_model.joblib`), the top of the dashboard
+shows the room's current state, updated about twice a second:
+
+- **Room** — HOME or AWAY
+- **Confidence** — the model's probability for the class it chose
+- **Air conditioning** — AC ON / AC OFF, with the reason spelled out
+- **p(occupied) timeline** — the probability trace against the tuned decision
+  line, so the decision *margin* is visible rather than just the verdict
+
+The line under it names the model, the window size, the threshold, how much data
+it was trained on, and its cross-validated recall. That cross-validated number is
+the honest one; the on-screen confidence is a single window's opinion.
+
+The predictor rebuilds the window from `raw_csi` and re-derives phase across the
+whole window, exactly as training does. It never falls back to a guess: no model
+means no verdict.
+
+#### 7. Replay a recording (no board needed)
+
+The **Replay a recording** panel feeds a saved session's packets through the live
+model at their original rate. One button per condition replays the first matching
+recording. This is how to demo or sanity-check the model without standing in the
+room with the hardware.
+
+Replayed values are read verbatim off disk — nothing is generated — and a replay
+is never written to a recording, so it cannot contaminate a labelled session. The
+card shows a **REPLAY** badge whenever the verdict came from a replay rather than
+a live board.
+
+#### 8. Find or export the data
 
 Native recordings are stored as ignored JSONL files in:
 
@@ -106,46 +137,66 @@ written into the dataset.
 Stop the server with `Control-C` in its terminal. Existing recordings remain in
 `recordings/` and are intentionally excluded from Git commits.
 
-## What happened with our first ESP32 capture
+## Results on our own hardware
 
-The file we tested was:
+First real training run, 1 September 2026. 30 recordings of 30 seconds each
+(10 `empty`, 10 `occupied_still`, 10 `occupied_moving`), boards untouched
+throughout, `CONFIG_FORCE_GAIN` enabled. 28 recordings passed the quality gate.
 
-```text
-data/firstdata-20260831T231802.310639Z_occupied_still.csv
-```
+Cross-validation **grouped by recording** — no window in a test fold shares a
+recording with any training window:
 
-We were inside the room for the entire recording. The correct answer for every
-part of this file is therefore **HOME**.
-
-The program successfully read all 2,007 CSI packets and turned them into 13
-short analysis windows. When we forced those windows through the old model, it
-returned:
-
-| Result | Windows |
+| Metric | Value |
 |---|---:|
-| HOME | 10 |
-| AWAY | 3 |
+| Accuracy | 96.5% |
+| **AWAY recall** (correctly detects an empty room) | **93.5%** |
+| **HOME recall** (leaves the AC on for someone who is home) | **98.2%** |
+| Macro F1 | 0.962 |
 
-The three AWAY results do **not** mean the room became empty. They were wrong.
-This is not a real accuracy test because:
+Per condition:
 
-- the current model was trained on Intel Wi-Fi hardware, not our ESP32 boards;
-- this capture only contains one condition: occupied and still;
-- we do not have an empty-room ESP32 recording to use as the room baseline;
-- the radio signal and packet timing changed heavily during the recording.
+| Condition | Correct |
+|---|---:|
+| `occupied_moving` | 99.7% |
+| `occupied_still` | 96.7% |
+| `empty` | 93.5% |
 
-The capture still helped. It proved that our CSV export contains valid raw CSI,
-the loader understands it, and the feature code runs on real ESP32-C6 data.
-It is useful for checking the data pipeline, but it is not enough to train or
-judge the occupancy detector.
+Winning configuration: the 7 **scale-free** features, baseline-calibrated,
+logistic regression, no smoothing, AWAY threshold 0.60. Notably the scale-free
+model beat the raw 16-feature model (93.5% vs 90.0% AWAY recall) — the features
+that carry an absolute amplitude scale were not just unnecessary, they were
+worse. `occupied_still` was expected to be the hard case and was not.
 
-The main capture problems were:
+### Ruling out the obvious confound
 
-- 199 packets (9.9%) contained all-zero CSI;
-- 1,025 packet IDs were missing;
-- one gap lasted 6.26 seconds;
-- the receiver gain kept changing and was maxed out for about half the capture;
-- the signal dropped from about -65 dBm to around -90 dBm.
+All 10 `empty` recordings were made first (01:13–01:24) and every occupied
+recording after (01:28–01:57), so "empty" was perfectly confounded with "early in
+the session". A channel that merely drifted over the hour would produce this
+same result. Two checks:
+
+- **Boundary test** — evaluating only on recordings either side of the
+  changeover, 4–7 minutes apart: 88.1% accuracy, 100% HOME recall. Still clearly
+  separated.
+- **Drift test** — train a model to distinguish the first five `empty`
+  recordings from the last five. It scored **0.406, below chance**. The channel
+  was stable across the block, so drift cannot explain the result.
+
+### What is still untested
+
+There is no `empty` recording from late in the session, so the drift check in
+`train_esp32.py` cannot run and "does it still work an hour later, or after the
+boards are bumped" is unanswered. The cheapest fix is five more `empty`
+recordings at the end of the next session, and interleaving conditions
+(`empty`, occupied, `empty`, ...) from then on.
+
+## Notes from the first (failed) capture
+
+The very first capture, `data/firstdata-*.csv`, is kept as a negative example.
+It is excluded automatically on quality: the AGC was wandering (sd 11.8),
+9.9% of packets carried all-zero CSI, and the packet interval jitter was 8.59
+against 0.16 in the good captures. Setting `CONFIG_FORCE_GAIN=1` in the receiver
+firmware is what fixed it — the second batch reports an AGC standard deviation
+of exactly 0.0.
 
 ## Run an ESP32 CSV
 
@@ -187,19 +238,100 @@ print(capture["X"].shape)       # one row per analysis window, 16 features
 print(capture["diagnostics"])  # packet rate, RSSI, gain, bad rows, and gaps
 ```
 
-## Files that matter
+## Repository layout
 
-| File | Why it matters |
+```text
+backend/            FastAPI collection server -- serial reader, recorder, CSV export
+frontend/           the dashboard served at http://127.0.0.1:8000
+src/
+  esp_csi.py        ESP32 CSV -> feature space, plus per-capture quality checks
+  features.py       raw CSI -> the 16 features; per-site baseline calibration
+  dataset.py        data/*.csv -> labelled training table (X, y, condition, group)
+  train_esp32.py    evaluate honestly, fit, and save the deployed model
+  train.py          shared estimators, metrics, split helpers
+  pipeline.py       inference + AC ON/OFF decision
+  intel/            reference experiment on the Intel dataset (not the deployed system)
+docs/               board setup, capture protocol, dashboard guarantees
+data/               your exported recordings
+artifacts/          build products: feature cache, trained model
+recordings/         raw JSONL written by the dashboard
+```
+
+## The training loop
+
+Everything from here is one cycle: record, check, train, read the report.
+
+### 1. Record and export
+
+Use the dashboard (above). One label per 30-second recording. Export each to
+`data/` with the label in the filename:
+
+```text
+data/apt_empty_01.csv
+data/apt_occupied_still_01.csv
+data/apt_occupied_moving_01.csv
+```
+
+The `session_label` column inside the CSV is authoritative; the filename is a
+fallback and a convenience for humans. Labels are matched on **meaning**, not on
+an exact string, so `Empty`, `occupied - still` and `Occupied Moving` all work.
+
+### 2. Check each capture before trusting it
+
+```bash
+.venv/bin/python -m src.esp_csi data/apt_empty_01.csv
+```
+
+A recording is automatically **excluded from training** if it has a wandering
+AGC, a lossy link, too many malformed rows, or too many all-zero CSI packets.
+Those are not noisy data, they are a second and wrong definition of "motion".
+Fix the capture rather than training around it.
+
+### 3. Build the table
+
+```bash
+.venv/bin/python -m src.dataset
+```
+
+Prints one line per recording — label, windows, packet rate, AGC spread, jitter,
+zero-CSI fraction, and whether it was kept — then the class balance.
+
+### 4. Train and evaluate
+
+```bash
+.venv/bin/python -m src.train_esp32
+```
+
+This searches feature sets x baseline modes x models x smoothing x decision
+threshold, scores every combination with cross-validation **grouped by
+recording**, prints the table, and saves the winner to
+`artifacts/esp32_model.joblib`.
+
+It refuses to save a model that is not deployable — one that would switch the AC
+off on somebody who is home, or one that never says AWAY at all and therefore
+saves nothing. `--save-anyway` overrides that; `--no-save` reports only.
+
+Useful flags:
+
+| Flag | Effect |
 |---|---|
-| `data/*.csv` | Put ESP32 capture files here. |
-| `src/esp_csi.py` | Reads and checks ESP32 CSV files. Start here for a new capture. |
-| `src/features.py` | Converts raw CSI into the 16 values used by the model. |
-| `src/pipeline.py` | Turns model output into HOME/AWAY and AC ON/OFF decisions. |
-| `src/train.py` | Trains and evaluates the occupancy model. |
-| `src/manual_label.py` | Combines a capture with a log of when people entered or left. |
-| `docs/ESP32_SETUP.md` | Board setup and the full data-collection checklist. |
-| `esp32_dry_run.py` | Tests the ESP32 code using fake data. |
-| `main.py` | Runs the older Intel-dataset demo. It does not take an ESP32 CSV. |
+| `--overlap 0.9` | More training rows from the same recordings. Safe: splits are by recording. |
+| `--window-seconds 5` | Longer windows. Steadier variance estimates, slower to react. |
+| `--augment-intel` | Add the calibrated Intel windows to training folds. Tests whether scale-free calibration really does transfer across radios. |
+| `--include-bad` | Train on quality-flagged recordings too. Contaminates the result; for debugging only. |
+| `--force` | Rebuild the feature cache after adding recordings. |
+
+### What to read in the report
+
+- **AWAY recall** is the number that matters. Accuracy is nearly meaningless
+  here because it moves with the class balance.
+- **HOME recall** is a constraint, not a metric to trade: below 98% the model
+  turns the AC off on people who are home.
+- **Accuracy per condition** tells you where you are losing. `occupied_still` is
+  the hard case — someone sitting perfectly still barely modulates the channel.
+- **The drift check** trains on the earliest recordings and tests on the latest.
+  A large drop there means the channel moved during the session, and the
+  baseline needs re-fitting periodically at deploy time.
 
 ## What to collect next
 
@@ -208,33 +340,43 @@ Fix the connection before collecting training data:
 1. Set `CONFIG_FORCE_GAIN=1` in the receiver firmware and reflash it.
 2. Move the boards or change the Wi-Fi channel until long gaps and zero-CSI
    packets stop appearing.
-3. Record a two-minute test and run `python -m src.esp_csi` on it.
+3. Record a 30-second test and run `python -m src.esp_csi` on it. It must come
+   back with a stable AGC and low jitter before anything else is worth recording.
 
-Once that test looks clean, record both classes with the boards left in the
-same positions:
+Then, with the boards left in exactly the same positions, aim for **at least 10
+recordings of each condition** and interleave them (`empty`, occupied, `empty`,
+...) rather than doing all of one and then all of the other — that is what makes
+the drift check meaningful. See [`docs/ESP32_SETUP.md`](docs/ESP32_SETUP.md) for
+the full protocol.
 
-- room empty;
-- one person sitting still;
-- one person moving around.
+## The Intel reference experiment
 
-We need both empty and occupied data before we can fit the room baseline,
-retrain on ESP32 measurements, and report meaningful accuracy. See
-[`docs/ESP32_SETUP.md`](docs/ESP32_SETUP.md) for the longer collection plan.
-
-## Older model results
-
-The model currently in the project was built from the WiFi-CrowdCounting
-dataset recorded with Intel IWL-5300 hardware. After room calibration it reached
-98.9% accuracy and 94.4% AWAY recall when testing on a room it had not seen.
-
-Those numbers are evidence that the feature approach can work. They are not
-performance numbers for our ESP32 boards. The ESP32 model needs to be retrained
-with clean ESP32 empty and occupied recordings.
-
-Commands for the older dataset work:
+`src/intel/` is not the deployed system. It is the experiment on the
+WiFi-CrowdCounting dataset (Intel IWL-5300 hardware) that produced the one
+design decision everything else rests on.
 
 ```bash
-.venv/bin/python -m src.build_dataset
-.venv/bin/python main.py
-.venv/bin/python validate_ehunam.py
+.venv/bin/python -m src.intel.build_dataset   # parse the .dat captures once
+.venv/bin/python -m src.intel.demo            # the full write-up
 ```
+
+| Evaluation | Accuracy | AWAY recall |
+|---|---:|---:|
+| Random 80/20 split over windows | 99.7% | — (inflated by session leakage) |
+| Leave-one-room-out, raw features | 89.1% | **8.7%** |
+| Leave-one-room-out, calibrated | 98.9% | **94.4%** |
+
+The 8.7% is the finding. Trained on two rooms and tested on a third, the model
+missed almost every empty room — it would leave the AC running in an empty
+house, which is the exact failure the product exists to prevent. Accuracy still
+read 89% only because 89% of windows were occupied.
+
+The fix was to stop using absolute feature values and express each one relative
+to that site's own quiet baseline. This needs no labels at the new site, only
+that the room is empty some of the time — and it is also why an ESP32 model is
+plausible at all: "5x my own noise floor" means the same thing on a $5 radio as
+on an Intel 5300.
+
+Those numbers are **not** performance numbers for the ESP32 boards. The feature
+pipeline transfers; the fitted model does not (1x1 antenna and 114 HT40
+subcarriers versus 3x2 and 90 channels). Retraining is `src/train_esp32.py`.

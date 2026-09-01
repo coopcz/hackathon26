@@ -218,23 +218,25 @@ a wandering AGC after 40 minutes of careful labelling is the worst outcome avail
 
 ## What to record
 
-Match the categories to what both training datasets already contain, so results are
-comparable rather than a separate universe:
+Every dashboard recording is exactly 30 seconds, so a "block" below means that
+many separate recordings with the same label. Match the categories to what the
+Intel training set already contains, so results are comparable rather than a
+separate universe:
 
-| # | Scenario | Duration | Maps to |
-|---|---|---|---|
-| 1 | **Empty room** — nobody inside, doors shut, you outside | **10 min** | `0p` (WiFi-CrowdCounting), `E` (EHUNAM) → AWAY |
-| 2 | **One person static** — seated, reading or on a laptop, not pacing | 5 min | `1p`, EHUNAM `PC` → HOME |
-| 3 | **One person moving** — walking the room continuously | 5 min | `1p`, EHUNAM `HAR` → HOME |
-| 4 | **Empty again** | 5 min | AWAY — the repeat is the point, see below |
-| 5 | **Two people** — both moving | 5 min | `2p` → HOME |
-| 6 | **Three or more**, if you can find the bodies | 5 min | `3p`+ → HOME |
-| 7 | **Empty, final** | 5 min | AWAY |
+| # | Scenario | Dashboard label | Recordings | Maps to |
+|---|---|---|---|---|
+| 1 | **Empty room** — nobody inside, doors shut, you outside | `empty` | **20** | `0p` → AWAY |
+| 2 | **One person static** — seated, reading or on a laptop, not pacing | `occupied_still` | 10 | `1p` → HOME |
+| 3 | **One person moving** — walking the room continuously | `occupied_moving` | 10 | `1p` → HOME |
+| 4 | **Empty again** | `empty` | 10 | AWAY — the repeat is the point, see below |
+| 5 | **Two people** — both moving | `occupied_moving` | 10 | `2p` → HOME |
+| 6 | **Three or more**, if you can find the bodies | `occupied_moving` | 10 | `3p`+ → HOME |
+| 7 | **Empty, final** | `empty` | 10 | AWAY |
 
-**Total ≈ 40 minutes.** If you only have 20, cut scenarios 5–6, never the empty
-stretches.
+**Total ≈ 80 recordings, ≈ 40 minutes of recorded time** plus countdowns. If you
+only have half that, cut scenarios 5–6, never the empty stretches.
 
-Why the empty room appears three times and gets the longest single block:
+Why the empty room appears three times and gets the most recordings:
 
 - `fit_site_baseline()` takes the **5th percentile** of this site's own windows as
   the quiet reference. If the room is never actually empty, the baseline is fitted
@@ -243,123 +245,124 @@ Why the empty room appears three times and gets the longest single block:
 - Repeating it at the start, middle and end is what tells you afterwards whether the
   channel *drifted* during the session — if the three empty blocks do not look alike,
   something moved, and that is worth knowing before you train on it.
-- 10 minutes at 100 Hz with 2.56 s windows is ~230 empty windows, a solid baseline.
+- 20 recordings at ~60 Hz with 2.56 s windows is ~220 empty windows, a solid
+  baseline.
 
-**One class is not enough.** A capture with no empty stretch cannot calibrate and
-cannot train; `label_from_manual_log` warns loudly if only one class survives.
+## Labelling discipline — this is the ground truth
 
-## Logging discipline — this is the ground truth
+There is no door sensor. **The label you pick in the dashboard before each
+recording is the label**, and it applies to the whole 30-second file.
 
-There is no door sensor. The log file **is** the labels.
+The dashboard enforces the protocol so nobody has to read a clock:
 
-- [ ] Write the `capture_start` line **at the same moment** you start
-      `csi_data_read_parse.py`. Everything else is measured from it. A 20-second
-      error here mislabels 20 seconds around every transition.
-- [ ] Log a line **the moment** someone crosses the threshold, not once they have
-      sat down. If you are unsure to within a few seconds, say so in the `note`
-      column — a window near a transition is dropped anyway (2 s guard band either
-      side), so an honest "±5s" is far better than a confident wrong number.
-- [ ] Always write the **absolute** `n_people` after the event, not just
-      entered/left. One missed line then costs one interval instead of corrupting
-      everything after it.
-- [ ] Log a `set` event whenever the *behaviour* changes without the count changing
-      (static → moving). The occupancy label does not change, but the note tells
-      you later which windows were which.
-- [ ] Note anything unplanned in the `note` column and log it as an event: a pet, a
-      neighbour walking past the wall, someone briefly opening the door, the HVAC
-      cycling on. Anything that moved is a candidate explanation for a weird window.
-- [ ] `capture_end` before you stop the capture script.
-- [ ] Don't hover next to the boards while logging. You are a reflector too.
+1. Pick one label: `empty`, `occupied_still`, or `occupied_moving`.
+2. Write notes: who, where they sat, room, door state, board placement, anything
+   else in the room that moves.
+3. Press **Start recording**, then walk to the test position during the
+   10-second countdown. Packets received during the countdown are discarded.
+4. The backend records for exactly 30 seconds and stops itself, so walking back
+   to the laptop afterwards cannot contaminate an `empty` trial.
 
-### Easiest way: `tools/mark.py`
+Checklist:
 
-In a second terminal, started at the same moment as the capture:
+- [ ] One condition per recording. Never change what the room is doing halfway
+      through — start a second recording instead.
+- [ ] Take many short recordings rather than a few long ones. Each 30 s file is
+      ~11 windows, and per-file grouping is what makes an honest
+      leave-one-recording-out split possible.
+- [ ] Re-record `empty` at the start, middle and end of the session. If the three
+      do not look alike, the channel drifted and you want to know that before
+      training on it.
+- [ ] Don't stand next to the boards while an `empty` recording runs. You are a
+      reflector too, even from the next room.
+- [ ] Put anything unplanned in the notes: a pet, a neighbour walking past the
+      wall, the HVAC cycling on. It is the only explanation you will have later
+      for a weird window.
 
-```bash
-.venv/bin/python tools/mark.py ~/captures/session1_log.csv
+### Naming exported files
+
+Export each session to CSV from **Previous recordings** and drop it in `data/`.
+Keep the label in the filename so the dataset builder can read it without opening
+the file:
+
+```text
+data/<site>_<label>_<n>.csv
+
+data/apt_empty_01.csv
+data/apt_occupied_still_01.csv
+data/apt_occupied_moving_01.csv
 ```
 
-Then just press a key and Enter as things happen — it stamps the time for you, so
-nobody is reading a clock while someone walks through the door:
-
-```
-> i person A sat on the couch     # someone entered   (count + 1)
-> 2 B joined, both walking        # set the count to exactly 2
-> o                               # someone left      (count - 1)
-> n neighbour walked past the wall   # note, count unchanged
-> q                               # writes capture_end and exits
-```
-
-It writes seconds-since-start, flushes and fsyncs every line, and produces exactly
-the format below. Stdlib only, nothing to install.
-
-### Or write it by hand
-
-Full spec in `src/manual_label.py`:
-
-```csv
-timestamp,event,n_people,note
-2026-08-31T19:05:00,capture_start,0,empty - calibration block
-2026-08-31T19:15:00,entered,1,person A walks in, sits on couch
-2026-08-31T19:20:00,set,1,person A now walking around
-2026-08-31T19:25:00,left,0,room empty again
-2026-08-31T19:30:00,entered,2,A and B both moving
-2026-08-31T19:35:00,left,0,everyone out
-2026-08-31T19:40:00,capture_end,0,
-```
-
-`timestamp` may be ISO-8601 as above, a bare `19:05:00` clock, or plain seconds from
-the start (`0`, `600`, `900`). Pick one style and use it for the whole file — mixing
-them is rejected rather than guessed at.
+The label is also stored inside the CSV in the `session_label` column, which is
+the authoritative copy; the filename is for humans.
 
 ## Immediately after the session
 
 ```bash
-# 1. Did the capture survive?
-.venv/bin/python -m src.esp_csi ~/captures/session1.csv
-
-# 2. Join it to the log and produce the labelled training table
-.venv/bin/python - <<'EOF'
-from src.manual_label import label_from_manual_log
-res = label_from_manual_log(
-    "~/captures/session1.csv",
-    "~/captures/session1_log.csv",
-    site="byu_apt",                      # the calibration unit; keep it stable
-    session="session1",
-    out_npz="artifacts/esp32_session1.npz")
-print(res["report"])
-EOF
+# Did the capture survive?
+.venv/bin/python -m src.esp_csi data/apt_empty_01.csv
 ```
 
-Check the printed report: the occupancy step function it echoes back should match
-what you remember happening. If a segment looks shifted, the `capture_start` anchor
-was off — fix it without retyping the log by passing `clock_offset=-12.0` (seconds).
+Check the report before you trust the file:
 
-The `.npz` it writes has exactly the keys `src/build_dataset.py` produces
-(`X`, `y`, `room`, `n_people`, `session`, `feature_names`), so it feeds
-`build_calibrated()` and `train_production_model()` unchanged.
+- `packet rate` should be steady and the interval jitter low. A lossy link
+  destroys the spectral features.
+- `gain stability` should be flat. If AGC is wandering, set `CONFIG_FORCE_GAIN 1`
+  in the receiver firmware and reflash — a gain step looks exactly like motion.
+- `first_word_invalid` and malformed-row counts should be near zero.
+- `link quality` RSSI should not be collapsing over the recording.
 
-- [ ] Back up both the CSV and the log **before** anyone touches the boards again.
-- [ ] Keep the `-l` text log too; it is the only record of dropped rows.
+- [ ] Back up the CSVs **before** anyone touches the boards again.
+- [ ] Keep the serial text log too; it is the only record of dropped rows.
+
+**One class is not enough.** A session with no `empty` recordings cannot
+calibrate a site baseline and cannot train.
+
 
 ## Retraining
 
 The feature pipeline transfers to the ESP32. **The Intel-fitted model does not** —
 1×1 antenna and 114 HT40 subcarriers versus the Intel 5300's 3×2 and 90 channels.
-Retrain on the ESP32 table using the same code:
+Retraining is two commands:
 
-```python
-import numpy as np
-from src.features import FEATURE_NAMES
-from src.train import build_calibrated, train_production_model
-
-z = np.load("artifacts/esp32_session1.npz", allow_pickle=True)
-Xc = build_calibrated(z["X"], z["y"], z["room"], FEATURE_NAMES)
-model = train_production_model(Xc, z["y"])
+```bash
+.venv/bin/python -m src.dataset        # inspect what your recordings look like
+.venv/bin/python -m src.train_esp32    # evaluate, fit, save
 ```
 
-With several sessions, `src.manual_label.merge_sessions([...])` stacks them, and
-`session` / `room` give you the grouping columns for an honest leave-one-session-out
-or leave-one-site-out split. A random split across windows from one continuous
-recording will read ~99% and mean nothing — that is the session-leakage trap
-documented in the README.
+`src/train_esp32.py` searches feature sets × baseline modes × models × smoothing
+× decision threshold and scores each with cross-validation **grouped by
+recording**, so no window in a test fold shares a recording with a training
+window. It refuses to save a model that would switch the AC off on somebody who
+is home, or one that never says AWAY and therefore saves nothing.
+
+Three things to know before reading its output:
+
+- **AWAY recall is the number.** Accuracy tracks the class balance and will look
+  respectable even when the model is useless.
+- **`occupied_still` is the hard condition.** A person sitting perfectly still
+  barely modulates the channel; the phase features are what separates them from
+  an empty room, and they need a stable AGC to work.
+- **The drift check** trains on your earliest recordings and tests on the latest.
+  If it drops sharply, the channel moved during the session — interleave the
+  conditions while recording and re-fit the baseline periodically at deploy time.
+
+To use a saved model on a new capture:
+
+```python
+import joblib, numpy as np
+from src.esp_csi import load_esp32_csi_csv
+from src.train_esp32 import apply_calibration
+from src.pipeline import should_run_ac, LABEL_NAMES
+
+b = joblib.load("artifacts/esp32_model.joblib")
+out = load_esp32_csi_csv("data/new_capture.csv", valid_subcarriers="reference",
+                         window_seconds=b["window_seconds"], verbose=False)
+Xc, _ = apply_calibration(out["X"], b["baseline"], b["feature_set"])
+p_home = b["model"].predict_proba(Xc)[:, 1]
+pred = np.where((1 - p_home) >= b["threshold"], 0, 1)
+print([LABEL_NAMES[i] for i in pred])
+```
+
+The baseline ships inside the bundle. A model without its site baseline is
+unusable — the features would be in units it was never trained on.

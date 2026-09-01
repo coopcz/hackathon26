@@ -8,38 +8,65 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .models import CSIPacket
+from .predictor import Predictor
 from .recorder import Recorder
+from .replay import Replayer
 from .serial_reader import SerialReader, available_ports
 
 logging.basicConfig(level=logging.INFO)
 ROOT = Path(__file__).resolve().parent.parent
 app = FastAPI(title="WiFi CSI Lab")
 recorder = Recorder(ROOT / "recordings")
+predictor = Predictor(ROOT / "artifacts" / "esp32_model.joblib")
 clients: set[WebSocket] = set()
 loop: asyncio.AbstractEventLoop | None = None
 
 
-async def broadcast(data: dict) -> None:
+async def broadcast(kind: str, data: dict) -> None:
     dead = []
     for ws in tuple(clients):
         try:
-            await ws.send_json({"type": "packet", "data": data})
+            await ws.send_json({"type": kind, "data": data})
         except Exception:
             dead.append(ws)
     clients.difference_update(dead)
 
 
+def _emit(kind: str, data: dict) -> None:
+    if loop:
+        asyncio.run_coroutine_threadsafe(broadcast(kind, data), loop)
+
+
+def _score_and_emit(packet: CSIPacket, source: str) -> None:
+    """Shared tail for live and replayed packets: chart update, then verdict."""
+    _emit("packet", {**packet.live_dict(), "source": source})
+    verdict = predictor.append(packet)
+    if verdict:
+        _emit("prediction", {**verdict, "source": source})
+
+
 def on_packet(packet: CSIPacket) -> None:
     recorder.append(packet)
-    if loop:
-        asyncio.run_coroutine_threadsafe(broadcast(packet.live_dict()), loop)
+    _score_and_emit(packet, "live")
+
+
+def on_replay_packet(packet: CSIPacket) -> None:
+    # deliberately does NOT touch the recorder: a replay must never be able to
+    # write itself into a labelled session
+    _score_and_emit(packet, "replay")
 
 
 reader = SerialReader(on_packet)
+replayer = Replayer(ROOT / "recordings", on_replay_packet)
 
 
 class ConnectBody(BaseModel):
     port: str
+
+
+class ReplayBody(BaseModel):
+    filename: str
+    speed: float = Field(default=1.0, gt=0, le=20)
 
 
 class RecordBody(BaseModel):
@@ -58,6 +85,7 @@ async def startup() -> None:
 @app.on_event("shutdown")
 def shutdown() -> None:
     reader.disconnect()
+    replayer.stop()
     recorder.stop()
 
 
@@ -66,12 +94,42 @@ def ports(): return available_ports()
 
 
 @app.get("/api/status")
-def status(): return {"serial": reader.status(), "recording": recorder.status()}
+def status():
+    return {"serial": reader.status(), "recording": recorder.status(),
+            "prediction": predictor.status(), "replay": replayer.status()}
+
+
+@app.post("/api/model/reload")
+def reload_model():
+    predictor.load()
+    return predictor.status()
+
+
+@app.get("/api/replay/recordings")
+def replay_recordings(): return replayer.available()
+
+
+@app.post("/api/replay/start")
+def replay_start(body: ReplayBody):
+    if reader.status().get("connected"):
+        raise HTTPException(400, "disconnect the board before replaying a recording")
+    try:
+        predictor.reset()
+        return replayer.start(body.filename, body.speed)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/replay/stop")
+def replay_stop(): return replayer.stop()
 
 
 @app.post("/api/connect")
 def connect(body: ConnectBody):
+    if replayer.status().get("active"):
+        raise HTTPException(400, "stop the replay before connecting to a board")
     try:
+        predictor.reset()
         reader.connect(body.port)
         return reader.status()
     except (ValueError, RuntimeError, OSError) as exc:

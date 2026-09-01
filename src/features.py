@@ -56,8 +56,6 @@ level:
 
 import numpy as np
 
-from .csi_reader import read_bf_file, get_scaled_csi
-
 # ~2.5 s at the dataset's ~50 Hz packet rate.  Long enough for the variance and
 # spectral estimates to be stable, short enough that an HVAC decision is timely.
 WINDOW = 128
@@ -84,24 +82,6 @@ def _sanitize_phase(phase):
     # least-squares slope/intercept per (packet, rx), vectorised over subcarriers
     slope = np.tensordot(unwrapped - unwrapped.mean(axis=1, keepdims=True), kc, axes=([1], [0])) / denom
     return unwrapped - slope[:, None, :] * kc[None, :, None] - unwrapped.mean(axis=1, keepdims=True)
-
-
-def file_to_arrays(path):
-    """Parse one .dat capture into (amplitude, sanitized_phase) arrays.
-
-    Only TX stream 0 is used.  Ntx is not constant *within* a file in this
-    dataset (packets alternate between 1 and 2 spatial streams), so stream 0 is
-    the only one guaranteed present in every packet.  Nrx is always 3.
-    """
-    entries = read_bf_file(path)
-    amps, phases = [], []
-    for e in entries:
-        csi = get_scaled_csi(e)[:, :, 0]  # (30 subcarriers, 3 rx)
-        amps.append(np.abs(csi))
-        phases.append(np.angle(csi))
-    amp = np.asarray(amps, dtype=np.float32)
-    ph = _sanitize_phase(np.asarray(phases, dtype=np.float64)).astype(np.float32)
-    return amp, ph
 
 
 # Both spectral features are pinned to ABSOLUTE frequencies rather than to

@@ -1,10 +1,15 @@
 """
-WiFi CSI presence detection -- end-to-end MVP.
+Intel IWL-5300 baseline -- the experiment that produced the calibration result.
 
-    python main.py
+    python -m src.intel.demo
 
-Runs dataset exploration, both evaluations (optimistic and realistic), feature
-importance, sample HVAC decisions, and the ESP32 ingestion path.
+This is REFERENCE WORK, not the deployed system.  It runs on the
+WiFi-CrowdCounting dataset (Di Domenico et al.), NOT on ESP32 captures, and the
+model it fits does not transfer to ESP32 hardware.  It exists because it is the
+evidence for the one design decision the whole project rests on: raw features do
+not survive a change of environment, per-site baseline calibration makes them.
+
+For the ESP32 system see src/dataset.py and src/train_esp32.py.
 """
 
 import os
@@ -12,18 +17,14 @@ import numpy as np
 from sklearn.inspection import permutation_importance
 from sklearn.model_selection import train_test_split
 
-from src.build_dataset import build
-from src.features import (FEATURE_NAMES, SCALE_FREE_FEATURES, fit_site_baseline,
-                          apply_site_baseline)
-from src.train import (make_rf, make_gb, metrics, print_confusion, evaluate_random_split,
-                       evaluate_leave_one_room_out, build_calibrated,
-                       evaluate_calibrated_loro, train_production_model,
-                       family_importance, RANDOM_STATE)
-from src.pipeline import (predict_presence, should_run_ac, load_esp32_csi_csv,
-                          make_synthetic_esp32_csv, verify_esp32_assumptions,
-                          LABEL_NAMES)
-
-ART = os.path.join(os.path.dirname(os.path.abspath(__file__)), "artifacts")
+from .build_dataset import build
+from ..features import (FEATURE_NAMES, SCALE_FREE_FEATURES, fit_site_baseline,
+                        apply_site_baseline)
+from ..train import (make_rf, make_gb, metrics, print_confusion, evaluate_random_split,
+                     evaluate_leave_one_site_out, build_calibrated,
+                     evaluate_calibrated_loso, train_production_model,
+                     family_importance, RANDOM_STATE)
+from ..pipeline import predict_presence, should_run_ac, LABEL_NAMES
 
 
 def rule(title):
@@ -110,7 +111,7 @@ def main():
     rule("PHASE 2.4  EVALUATION 2 of 2 -- LEAVE-ONE-ROOM-OUT (REALISTIC)")
     print("  Train on two rooms, test on a room the model has never seen. This is the\n"
           "  honest proxy for 'deploy it in a different house'.\n")
-    res = evaluate_leave_one_room_out(X, y, room)
+    res = evaluate_leave_one_site_out(X, y, room)
     for held, r in res.items():
         print(f"  held-out {held}:")
         show_metrics(r["metrics"], indent="    ")
@@ -143,7 +144,7 @@ def main():
     print("  the time during a calibration recording.\n")
 
     Xc = build_calibrated(X, y, room, FEATURE_NAMES)
-    cres = evaluate_calibrated_loro(Xc, y, room)
+    cres = evaluate_calibrated_loso(Xc, y, room)
     for held, r in cres.items():
         print(f"  held-out {held}:")
         show_metrics(r["metrics"], indent="    ")
@@ -190,31 +191,6 @@ def main():
     print(f"\n  {correct}/{len(sample)} correct on this sample.")
 
     # ------------------------------------------------------------------
-    rule("PHASE 3.2  ESP32 INGESTION PATH")
-    print("  No real ESP32 capture yet, so a fixture in the EXACT esp-csi csi_recv format")
-    print("  (15-column ESP32-C6 schema, HT40, 128 subcarriers) is generated to prove the")
-    print("  code path runs. Format-only: it says nothing about accuracy on real hardware.")
-    print("  For the full integration dry run see esp32_dry_run.py.\n")
-    occ = make_synthetic_esp32_csv(os.path.join(ART, "esp32_sample_occupied.csv"),
-                                   occupied=True, seed=1)
-    emp = make_synthetic_esp32_csv(os.path.join(ART, "esp32_sample_empty.csv"),
-                                   occupied=False, seed=2)
-    verify_esp32_assumptions(occ)
-    print()
-    for path, tag in [(occ, "occupied-like"), (emp, "empty-like")]:
-        out = load_esp32_csi_csv(path, verbose=False)
-        print(f"  {os.path.basename(path)} ({tag}): X={out['X'].shape}, fs={out['fs']:.0f} Hz, "
-              f"{out['n_subcarriers']} subcarriers")
-    print("\n  Both files land in the SAME 16-column feature space as the Intel data:")
-    print(f"    {', '.join(FEATURE_NAMES)}")
-    print("\n  To run real ESP32 data through this exact model:")
-    print("    from src.pipeline import load_esp32_csi_csv, predict_presence, should_run_ac")
-    print("    from src.features import fit_site_baseline")
-    print("    out  = load_esp32_csi_csv('my_capture.csv')")
-    print("    base = fit_site_baseline(out['X'], FEATURE_NAMES)   # calibrate to this house")
-    print("    pred, conf = predict_presence(model, out['X'][0], baseline=base, fs=out['fs'])")
-    print("    run_ac, why = should_run_ac(pred, conf)")
-
     rule("SUMMARY")
     print(f"  Dataset          WiFi-CrowdCounting (Di Domenico et al.), Intel IWL-5300,")
     print(f"                   3 rooms x 9 occupancy levels, 229,837 packets -> {len(X)} windows")
@@ -224,6 +200,7 @@ def main():
     print(f"  Top signal       temporal variance + normalised variance; NOT mean amplitude")
     print(f"  ESP32 hand-off   feature pipeline transfers; the fitted model does NOT")
     print(f"                   (1x1 antenna, 114 vs 90 channels) -- retrain, reuse the code")
+    print(f"                   see src/train_esp32.py")
 
 
 if __name__ == "__main__":

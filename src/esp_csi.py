@@ -52,6 +52,7 @@ own features from the raw radio samples.
 
 import csv
 import os
+import json
 import re
 import sys
 
@@ -204,7 +205,12 @@ _CSI_LINE_RE = re.compile(r"^CSI_DATA,")
 # ---------------------------------------------------------------------------
 
 def _parse_csi_blob(blob):
-    """Parse the bracketed int list. esp-csi uses commas, ESP32-CSI-Tool spaces."""
+    """Parse the bracketed int list. esp-csi uses commas, ESP32-CSI-Tool spaces.
+
+    JSONL recordings hand us a real list, which needs no parsing at all.
+    """
+    if isinstance(blob, (list, tuple, np.ndarray)):
+        return np.asarray(blob, dtype=np.float32)
     return np.array(blob.strip().strip('"').strip("[]").replace(",", " ").split(),
                     dtype=np.float32)
 
@@ -217,11 +223,89 @@ def _unwrap_timestamps(ts_us):
     measured span negative and the derived packet rate nonsense.
     """
     ts = np.asarray(ts_us, dtype=np.float64)
+    # The counter is UNSIGNED 32-bit, but it reaches us through a signed int, so
+    # everything past 2**31 us (~35.8 min of board uptime) arrives negative.
+    # Left alone, the first negative value makes the measured span nonsense and
+    # the derived packet rate with it.
+    ts = np.where(ts < 0, ts + _TIMESTAMP_MODULUS, ts)
     if len(ts) < 2:
         return ts
     # a genuine backwards step of more than half the modulus is a wrap, not jitter
     wraps = np.cumsum(np.diff(ts) < -(_TIMESTAMP_MODULUS / 2))
     return ts + np.concatenate([[0.0], wraps]) * _TIMESTAMP_MODULUS
+
+
+JSONL_REQUIRED_KEYS = {"raw_csi", "esp_timestamp", "declared_len"}
+
+
+def _read_jsonl_rows(filepath):
+    """Read a dashboard JSONL recording: one JSON object per accepted packet.
+
+    This is the recorder's NATIVE output and is a strict superset of the CSV
+    export -- same raw integer I/Q array, same board metadata, same session
+    label -- so training reads it directly and nobody has to click Export CSV
+    thirty times.  A truncated final line (power lost mid-write) is counted as
+    malformed rather than aborting the file.
+    """
+    blobs, meta, bad, seen = [], [], 0, 0
+    with open(filepath, errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            seen += 1
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                bad += 1
+                continue
+            raw = rec.get("raw_csi")
+            if not isinstance(raw, list) or not raw or not JSONL_REQUIRED_KEYS <= rec.keys():
+                bad += 1
+                continue
+            # normalise onto the same field names the CSV schemas use
+            rec["data"] = raw
+            rec["len"] = rec.get("declared_len", "")
+            rec["local_timestamp"] = rec.get("esp_timestamp", "")
+            blobs.append(raw)
+            meta.append(rec)
+    return "esp-csi/jsonl-recording", sorted(JSONL_REQUIRED_KEYS), blobs, meta, seen, bad
+
+
+def _pack_rows(filepath, schema_name, cols, blobs, meta, seen, bad):
+    """Shared tail: parallel per-packet arrays from whichever reader ran."""
+    if not blobs:
+        raise ValueError(f"no CSI packets parsed from {filepath} "
+                         f"({seen} candidate rows seen, {bad} rejected)")
+
+    def col(name, dtype=float, default=np.nan):
+        vals = []
+        for r in meta:
+            try:
+                vals.append(dtype(r[name]))
+            except (KeyError, TypeError, ValueError):
+                vals.append(default)
+        return np.array(vals)
+
+    return {
+        "schema": schema_name,
+        "columns": cols,
+        "blobs": blobs,
+        # session exports and JSONL carry the operator's label; raw dumps do not
+        "session_label": next((r["session_label"] for r in meta if r.get("session_label")), ""),
+        "session_notes": next((r["session_notes"] for r in meta if r.get("session_notes")), ""),
+        "mac": np.array([r.get("mac", "") for r in meta]),
+        "rssi": col("rssi"),
+        "noise_floor": col("noise_floor"),
+        "agc_gain": col("agc_gain"),
+        "fft_gain": col("fft_gain"),
+        "channel": col("channel"),
+        "len": col("len"),
+        "first_word": col("first_word"),
+        "ts_us_raw": col("local_timestamp"),
+        "n_rows_seen": seen,
+        "n_rows_bad": bad,
+    }
 
 
 def read_esp_csi_rows(filepath):
@@ -235,6 +319,9 @@ def read_esp_csi_rows(filepath):
 
     Returns a dict of numpy arrays plus `schema`, `n_rows_seen`, `n_rows_bad`.
     """
+    if str(filepath).endswith(".jsonl"):
+        return _pack_rows(filepath, *_read_jsonl_rows(filepath))
+
     blobs, meta, bad, seen = [], [], 0, 0
     schema_name, cols = None, None
     session_export_cols = None
@@ -296,35 +383,7 @@ def read_esp_csi_rows(filepath):
             blobs.append(blob)
             meta.append(rec)
 
-    if not blobs:
-        raise ValueError(f"no CSI_DATA rows parsed from {filepath} "
-                         f"({seen} candidate rows seen, {bad} rejected)")
-
-    def col(name, dtype=float, default=np.nan):
-        vals = []
-        for r in meta:
-            try:
-                vals.append(dtype(r[name]))
-            except (KeyError, TypeError, ValueError):
-                vals.append(default)
-        return np.array(vals)
-
-    return {
-        "schema": schema_name,
-        "columns": cols,
-        "blobs": blobs,
-        "mac": np.array([r.get("mac", "") for r in meta]),
-        "rssi": col("rssi"),
-        "noise_floor": col("noise_floor"),
-        "agc_gain": col("agc_gain"),
-        "fft_gain": col("fft_gain"),
-        "channel": col("channel"),
-        "len": col("len"),
-        "first_word": col("first_word"),
-        "ts_us_raw": col("local_timestamp"),
-        "n_rows_seen": seen,
-        "n_rows_bad": bad,
-    }
+    return _pack_rows(filepath, schema_name, cols, blobs, meta, seen, bad)
 
 
 def _auto_valid_subcarriers(csi, verbose=True):
@@ -356,6 +415,7 @@ def _auto_valid_subcarriers(csi, verbose=True):
 
 
 def load_esp32_csi_csv(filepath, window=None, stride=None, valid_subcarriers="auto",
+                       window_seconds=None, overlap=0.0,
                        imag_first=ESP_CSI_IMAG_FIRST, drop_first_word=False,
                        verbose=True):
     """Load an esp-csi (or legacy ESP32-CSI-Tool) capture into our feature space.
@@ -396,7 +456,18 @@ def load_esp32_csi_csv(filepath, window=None, stride=None, valid_subcarriers="au
     if drop_first_word:                                  # OPEN 2
         csi[:, :2, :] = 0
 
-    if valid_subcarriers == "auto":
+    if valid_subcarriers == "reference":
+        # Training REQUIRES every recording to use an identical subcarrier set --
+        # "auto" is per-file and a single dead subcarrier in one capture silently
+        # shifts every column of the feature vector.  Pin the documented map.
+        ref = REFERENCE_SUBCARRIER_MAPS.get(n_sub_total)
+        if ref is None:
+            raise ValueError(
+                f"{filepath}: no documented subcarrier map for {n_sub_total} raw "
+                f"subcarriers (known: {sorted(REFERENCE_SUBCARRIER_MAPS)}). "
+                f"Pass an explicit list or 'auto'.")
+        valid_subcarriers = ref[1]
+    elif valid_subcarriers == "auto":
         valid_subcarriers = _auto_valid_subcarriers(csi, verbose=verbose)
     if valid_subcarriers is not None:
         csi = csi[:, list(valid_subcarriers), :]
@@ -422,9 +493,12 @@ def load_esp32_csi_csv(filepath, window=None, stride=None, valid_subcarriers="au
     # Window length is defined in SECONDS so a 100 Hz ESP32 capture yields
     # physically comparable windows to the 2.56 s Intel windows.
     if window is None:
-        window = max(32, int(round(fs * (WINDOW / 50.0))))
+        window = max(32, int(round(fs * (window_seconds or (WINDOW / 50.0)))))
     if stride is None:
-        stride = window
+        # overlap>0 multiplies the number of training rows.  It is only safe when
+        # the train/test split is BY RECORDING -- two overlapping windows share
+        # packets, so splitting by window would put the same packets on both sides.
+        stride = max(1, int(round(window * (1.0 - overlap))))
 
     X = windows_from_arrays(amp, phase, window=window, stride=stride, fs=fs)
     starts = np.arange(0, len(amp) - window + 1, stride)
@@ -462,6 +536,8 @@ def load_esp32_csi_csv(filepath, window=None, stride=None, valid_subcarriers="au
     return {"X": X, "fs": fs, "amp": amp, "phase": phase, "t": t,
             "window_t0": window_t0, "window_t1": window_t1,
             "window": window, "stride": stride, "schema": rec["schema"],
+            "session_label": rec["session_label"], "session_notes": rec["session_notes"],
+            "subcarriers": list(valid_subcarriers) if valid_subcarriers is not None else None,
             "n_subcarriers": csi.shape[1], "rssi": rec["rssi"][keep_row],
             "diagnostics": diagnostics}
 
@@ -528,95 +604,6 @@ def verify_esp32_assumptions(filepath, verbose=True):
     print(f"  parse health ................. {d['n_rows_bad']} malformed of "
           f"{d['n_rows_seen']} CSI rows, {d['len_column_mismatches']} len-column mismatches")
     return out
-
-
-# ---------------------------------------------------------------------------
-# Synthetic fixture in the EXACT esp-csi format
-# ---------------------------------------------------------------------------
-
-def make_esp_csi_fixture(path, n_packets=1500, fs=100.0, occupied=True, seed=0,
-                         schema="esp-csi/c5c6c61", buggy_header=True,
-                         n_people=1):
-    """Write a file byte-compatible with what csi_data_read_parse.py saves.
-
-    This is a FORMAT fixture, not physics.  It proves the ingestion path runs
-    end to end before hardware exists; it must never be used to claim anything
-    about accuracy.
-
-    buggy_header : reproduce the upstream bug where the tool writes the
-                   25-column header even for 15-column C6 rows.  Default True,
-                   because that is what a real capture will look like.
-    """
-    rng = np.random.default_rng(seed)
-    cols = SCHEMAS[schema]
-    c6 = schema == "esp-csi/c5c6c61"
-
-    # HT40 on a C6: 128 subcarriers, of which 114 carry energy.
-    n_sub = 128 if c6 else 64
-    valid = (ESP_CSI_HT40_VALID_SUBCARRIERS if n_sub == 128
-             else ESP_CSI_HT20_VALID_SUBCARRIERS)
-
-    # A plausible static multipath signature: frequency-selective fading across
-    # the band, amplitudes in the int8 range the firmware actually prints
-    # (the upstream example row spans roughly -31..+19 per component).
-    base = np.zeros(n_sub)
-    k = np.linspace(0, 1, len(valid))
-    base[valid] = 18 + 7 * np.sin(2 * np.pi * 1.7 * k) + 3 * np.cos(2 * np.pi * 4.3 * k)
-
-    # Occupied: a body is a slow, correlated modulator of the multipath sum, and
-    # it perturbs subcarriers unequally.  Empty: a static channel plus thermal
-    # noise, which is broadband and decorrelates instantly.  This is exactly the
-    # contrast features.py is built to measure.
-    if occupied:
-        walk = np.cumsum(rng.normal(0, 0.28, n_packets))
-        sc_weight = 0.5 + rng.random(n_sub)
-        amp_noise, ph_noise = 0.55, 0.16
-    else:
-        walk = np.zeros(n_packets)
-        sc_weight = np.zeros(n_sub)
-        amp_noise, ph_noise = 0.45, 0.03
-
-    ramp = np.linspace(-2.0, 2.0, n_sub)  # the per-packet linear phase slope
-    ts0 = int(rng.integers(0, 2 ** 31))   # boot clock starts wherever it likes
-    mac = "1a:00:00:00:00:00"             # CONFIG_CSI_SEND_MAC from csi_send
-
-    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-    with open(path, "w", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(ESP_CSI_CLASSIC_COLUMNS if (buggy_header and c6) else cols)
-        for i in range(n_packets):
-            gain = 1.0 + 0.30 * sc_weight * np.sin(walk[i]) if occupied else 1.0
-            mag = base * gain + rng.normal(0, amp_noise, n_sub)
-            phi = (ramp + rng.normal(0, 0.9)          # per-packet CFO/STO slope
-                   + rng.normal(0, ph_noise, n_sub)
-                   + (0.8 * sc_weight * np.sin(walk[i]) if occupied else 0.0))
-            mag[base == 0] = 0.0                       # guard bands are hard zeros
-            re = np.clip(np.round(mag * np.cos(phi)), -128, 127).astype(int)
-            im = np.clip(np.round(mag * np.sin(phi)), -128, 127).astype(int)
-            re[base == 0] = 0
-            im[base == 0] = 0
-            inter = np.empty(2 * n_sub, dtype=int)
-            inter[0::2], inter[1::2] = (im, re) if ESP_CSI_IMAG_FIRST else (re, im)
-            blob = "[" + ",".join(map(str, inter)) + "]"
-
-            # 100 Hz nominal with realistic jitter, plus the odd ESP-NOW drop
-            ts = ts0 + int(i * ESP32_TIMESTAMP_UNITS_PER_SEC / fs
-                           + rng.normal(0, 250)) % _TIMESTAMP_MODULUS
-            rssi = int(np.round(rng.normal(-28 if occupied else -27, 1.5)))
-            if c6:
-                row = ["CSI_DATA", i, mac, rssi, 11, -96,
-                       32, 4, 11, ts, 47, 0, 2 * n_sub, 0, blob]
-            else:
-                row = ["CSI_DATA", i, mac, rssi, 11, 1, 6, 1, 0, 1, 0, 1, 0, 0,
-                       -93, 0, 11, 2, ts, 0, 67, 0, 2 * n_sub, 0, blob]
-            w.writerow(row)
-    return path
-
-
-def make_synthetic_esp32_csv(path, n_packets=1200, fs=100.0, occupied=True, seed=0):
-    """Back-compat shim: the old name now emits the real esp-csi C6 format."""
-    return make_esp_csi_fixture(path, n_packets=n_packets, fs=fs,
-                                occupied=occupied, seed=seed)
 
 
 if __name__ == "__main__":

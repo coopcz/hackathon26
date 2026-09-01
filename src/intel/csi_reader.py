@@ -28,6 +28,8 @@ For code==187 the payload is a bfee_notif struct:
 
 import numpy as np
 
+from ..features import _sanitize_phase
+
 BFEE_CODE = 187
 N_SUBCARRIERS = 30
 
@@ -171,3 +173,25 @@ def read_bf_file(path, max_packets=None):
         if max_packets is not None and len(entries) >= max_packets:
             break
     return entries
+
+
+# ---------------------------------------------------------------------------
+# Bridge into the shared feature space
+# ---------------------------------------------------------------------------
+
+def file_to_arrays(path):
+    """Parse one .dat capture into (amplitude, sanitized_phase) arrays.
+
+    Only TX stream 0 is used.  Ntx is not constant *within* a file in this
+    dataset (packets alternate between 1 and 2 spatial streams), so stream 0 is
+    the only one guaranteed present in every packet.  Nrx is always 3.
+    """
+    entries = read_bf_file(path)
+    amps, phases = [], []
+    for e in entries:
+        csi = get_scaled_csi(e)[:, :, 0]  # (30 subcarriers, 3 rx)
+        amps.append(np.abs(csi))
+        phases.append(np.angle(csi))
+    amp = np.asarray(amps, dtype=np.float32)
+    ph = _sanitize_phase(np.asarray(phases, dtype=np.float64)).astype(np.float32)
+    return amp, ph

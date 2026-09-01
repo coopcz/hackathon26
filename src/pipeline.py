@@ -91,8 +91,6 @@ from .esp_csi import (  # noqa: E402,F401
     load_esp32_csi_csv,
     read_esp_csi_rows,
     verify_esp32_assumptions,
-    make_esp_csi_fixture,
-    make_synthetic_esp32_csv,
     ESP_CSI_C6_COLUMNS,
     ESP_CSI_CLASSIC_COLUMNS,
     ESP32_CSI_TOOL_COLUMNS,

@@ -3,10 +3,11 @@
 import os
 import numpy as np
 
-from .features import file_to_arrays, windows_from_arrays, FEATURE_NAMES
+from ..features import windows_from_arrays, FEATURE_NAMES
+from .csi_reader import file_to_arrays
 
-DATA_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "WiFi-CrowdCounting")
-CACHE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "artifacts", "features.npz")
+DATA_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "WiFi-CrowdCounting")
+CACHE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "artifacts", "features.npz")
 
 
 def build(force=False):
