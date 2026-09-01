@@ -4,6 +4,14 @@ This project uses Wi-Fi Channel State Information (CSI) from two ESP32-C6 boards
 to decide whether a room is occupied. The eventual goal is to turn the AC off
 when nobody is home.
 
+## Live CSI collection dashboard
+
+The repository now includes a local FastAPI dashboard for connecting directly
+to the ESP32-C6 receiver, visualizing real CSI, labeling timed sessions, and
+exporting lossless JSONL or CSV datasets. It never substitutes generated values
+for missing board data. See [`docs/WIFI_CSI_LAB.md`](docs/WIFI_CSI_LAB.md) for
+setup, data-integrity guarantees, and recording details.
+
 ## What happened with our first ESP32 capture
 
 The file we tested was:
