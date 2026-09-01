@@ -321,6 +321,23 @@ Useful flags:
 | `--include-bad` | Train on quality-flagged recordings too. Contaminates the result; for debugging only. |
 | `--force` | Rebuild the feature cache after adding recordings. |
 
+### Proving it isn't guessing or memorizing order
+
+```bash
+.venv/bin/python -m src.prove
+```
+
+Three checks against the exact model in `artifacts/esp32_model.joblib`:
+
+| Check | Answers | Result |
+|---|---|---:|
+| Label permutation (200 shuffles) | "Is it just guessing accurately?" | real 93.5% vs. chance 1.5% avg, p=0.0000 |
+| Order-memorization (per condition) | "Is it remembering recording order?" | not distinguishable from chance, p=0.14–0.36 |
+| Blind holdout (7 recordings, never tuned on) | "Does it generalize?" | 100% accuracy |
+
+Saves two charts to `artifacts/proof/` for slides. Full writeup, exact wording
+for each objection, and what *not* to claim: [`docs/PROOF.md`](docs/PROOF.md).
+
 ### What to read in the report
 
 - **AWAY recall** is the number that matters. Accuracy is nearly meaningless
