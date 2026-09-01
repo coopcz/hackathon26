@@ -42,7 +42,8 @@ Saved sessions can also be exported from the dashboard as CSV. Array fields
 (`raw_csi`, `amplitude`, and `phase`) are JSON-encoded inside correctly quoted
 CSV cells, preserving every value and the original I/Q ordering.
 
-Recording starts use a backend-enforced 10-second setup exclusion window. CSI
-packets received during the countdown are displayed live but are not written to
-the session, preventing the operator leaving the computer from contaminating
-the labeled sample.
+Recording starts use a backend-enforced 10-second setup exclusion window,
+followed by exactly 30 seconds of recording and an automatic stop. CSI packets
+received during the countdown or after the 30-second cutoff are not written to
+the session, preventing operator movement at either end from contaminating the
+labeled sample.

@@ -64,14 +64,13 @@ packet count increases with valid CSI. Do not connect both ports in the app.
    and anything moving in the environment.
 3. Click **Start recording**.
 4. Move to the intended test position during the 10-second countdown.
-5. Collect the planned duration, then click **Cancel / Stop**.
+5. The app records for 30 seconds and then stops automatically.
 
 The backend excludes every packet received during the countdown. Once the
-countdown finishes, every accepted packet is saved until Stop is clicked. For
-an empty-room trial, be aware that walking back to the computer before clicking
-Stop becomes part of the recording; keep the computer outside the measured
-area, use an assistant, or exclude that trial from training if it is
-contaminated.
+countdown finishes, every accepted packet is saved for exactly 30 seconds. The
+backend then closes the file automatically, so walking back to the computer
+after completion does not contaminate an empty-room trial. **Cancel / Stop** is
+still available to discard the countdown or end a recording early.
 
 #### 6. Find or export the data
 

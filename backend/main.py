@@ -46,6 +46,7 @@ class RecordBody(BaseModel):
     label: str
     notes: str = Field(default="", max_length=2000)
     delay_seconds: int = Field(default=10, ge=0, le=60)
+    duration_seconds: int = Field(default=30, ge=1, le=3600)
 
 
 @app.on_event("startup")
@@ -85,7 +86,7 @@ def disconnect():
 
 @app.post("/api/recordings/start")
 def start_recording(body: RecordBody):
-    try: return recorder.start(body.label, body.notes, body.delay_seconds)
+    try: return recorder.start(body.label, body.notes, body.delay_seconds, body.duration_seconds)
     except (ValueError, RuntimeError, OSError) as exc: raise HTTPException(400, str(exc)) from exc
 
 

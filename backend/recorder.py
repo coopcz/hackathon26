@@ -20,28 +20,40 @@ class Recorder:
         self.file = None
         self.info = None
         self.record_after = None
+        self.record_until = None
+        self.last_result = None
 
-    def start(self, label: str, notes: str, delay_seconds: int = 10) -> dict:
+    def start(self, label: str, notes: str, delay_seconds: int = 10, duration_seconds: int = 30) -> dict:
         if label not in LABELS:
             raise ValueError("invalid recording label")
         if delay_seconds < 0 or delay_seconds > 60:
             raise ValueError("recording delay must be between 0 and 60 seconds")
+        if duration_seconds < 1 or duration_seconds > 3600:
+            raise ValueError("recording duration must be between 1 and 3600 seconds")
         with self.lock:
             if self.info:
                 raise RuntimeError("a recording is already active")
             now = datetime.now(timezone.utc)
             starts_at = now + timedelta(seconds=delay_seconds)
+            ends_at = starts_at + timedelta(seconds=duration_seconds)
             safe_label = re.sub(r"[^a-z0-9_-]", "_", label)
             path = self.directory / f"{starts_at.strftime('%Y%m%dT%H%M%S.%fZ')}_{safe_label}.jsonl"
             self.info = {"filename": path.name, "label": label, "notes": notes,
                          "requested_at": now.isoformat(), "started_at": starts_at.isoformat(),
-                         "packet_count": 0, "delay_seconds": delay_seconds}
+                         "ends_at": ends_at.isoformat(), "packet_count": 0,
+                         "delay_seconds": delay_seconds, "duration_seconds": duration_seconds}
             self.record_after = time.monotonic() + delay_seconds
+            self.record_until = self.record_after + duration_seconds
+            self.last_result = None
             return self._status_unlocked()
 
     def append(self, packet: CSIPacket) -> None:
         with self.lock:
-            if not self.info or time.monotonic() < self.record_after:
+            now = time.monotonic()
+            if not self.info or now < self.record_after:
+                return
+            if now >= self.record_until:
+                self._finish_unlocked("automatic")
                 return
             if not self.file:
                 path = self.directory / self.info["filename"]
@@ -60,28 +72,40 @@ class Recorder:
         with self.lock:
             if not self.info:
                 return None
-            if self.file:
-                self.file.close()
-            self.file = None
-            result, self.info = self.info, None
-            result["cancelled_during_countdown"] = time.monotonic() < self.record_after
-            self.record_after = None
-            return result
+            reason = "cancelled" if time.monotonic() < self.record_after else "manual"
+            return self._finish_unlocked(reason)
 
     def status(self) -> dict:
         with self.lock:
             return self._status_unlocked()
 
     def _status_unlocked(self) -> dict:
+        if self.info and time.monotonic() >= self.record_until:
+            self._finish_unlocked("automatic")
         if not self.info:
-            return {"active": False, "state": "idle"}
+            return {"active": False, "state": "idle", "last_result": self.last_result}
         remaining = max(0.0, self.record_after - time.monotonic())
+        recording_remaining = max(0.0, self.record_until - time.monotonic())
         return {
             "active": True,
             "state": "countdown" if remaining > 0 else "recording",
             "countdown_remaining": remaining,
+            "recording_remaining": recording_remaining,
             **self.info,
         }
+
+    def _finish_unlocked(self, reason: str) -> dict:
+        if self.file:
+            self.file.close()
+        self.file = None
+        result, self.info = self.info, None
+        result["stop_reason"] = reason
+        result["cancelled_during_countdown"] = reason == "cancelled"
+        result["stopped_at"] = datetime.now(timezone.utc).isoformat()
+        self.record_after = None
+        self.record_until = None
+        self.last_result = dict(result)
+        return result
 
     def list(self) -> list[dict]:
         result = []
