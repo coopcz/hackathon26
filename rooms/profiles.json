@@ -1,0 +1,42 @@
+[
+  {
+    "id": "presentation-room",
+    "name": "Test Room",
+    "placement": "Boards 4 feet apart, at the front of the classroom",
+    "created_at": "2026-09-01T07:09:04.410902+00:00",
+    "latest_model": "rooms/presentation-room/models/model-20260901T152100Z.joblib",
+    "trained_at": "2026-09-01T15:21:31.573858+00:00",
+    "validated": false,
+    "validated_at": null,
+    "validation_report": null,
+    "active": false,
+    "preview": false
+  },
+  {
+    "id": "test-room-2",
+    "name": "Test Room 2",
+    "placement": "less than a meter apart",
+    "created_at": "2026-09-01T15:43:28.684544+00:00",
+    "latest_model": "rooms/test-room-2/models/model-emergency-demo.joblib",
+    "trained_at": "2026-09-01T16:17:07.420160+00:00",
+    "validated": false,
+    "validated_at": null,
+    "validation_report": null,
+    "active": true,
+    "preview": true,
+    "preview_started_at": "2026-09-01T16:19:08.207338+00:00"
+  },
+  {
+    "id": "test-3",
+    "name": "test 3",
+    "placement": "less than a meter",
+    "created_at": "2026-09-01T16:16:15.807468+00:00",
+    "latest_model": null,
+    "trained_at": null,
+    "validated": false,
+    "validated_at": null,
+    "validation_report": null,
+    "active": false,
+    "preview": false
+  }
+]
